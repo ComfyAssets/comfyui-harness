@@ -1,0 +1,180 @@
+"""The single agent session: start, attach, takeover, backpressure, limits.
+
+The host is injected (`host_factory`) so this module stays free of the
+Linux-only PTY code and runs under any test.
+"""
+
+import os
+import secrets
+import time
+from pathlib import Path
+from typing import Any, Callable, Optional, Protocol
+
+from . import cli as cli_mod
+from .guard import Refusal
+
+IDLE_SECONDS = 1800
+DETACHED_LIMIT_SECONDS = 43200
+TICK_SECONDS = 30
+HIGH_WATER = 1 << 20
+BOOT_BYTES = 8
+
+
+class Sink(Protocol):
+    def send_bytes(self, data: bytes) -> None: ...
+
+    def send_json(self, message: dict) -> None: ...
+
+    def buffered(self) -> int: ...
+
+
+class SessionManager:
+    def __init__(
+        self,
+        host_factory: Callable[[], Any],
+        store: Any,
+        cwd: Path,
+        comfy_port: Callable[[], int],
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._host_factory = host_factory
+        self._store = store
+        self._cwd = cwd
+        self._comfy_port = comfy_port
+        self._clock = clock
+        self.boot = secrets.token_hex(BOOT_BYTES)
+        self._host: Any = None
+        self._cli_id = ""
+        self._started = 0.0
+        self._sink: Optional[Sink] = None
+        self._last_detach = 0.0
+        self._last_output = 0.0
+
+    def info(self) -> Optional[dict]:
+        if self._host is None:
+            return None
+        return {"cli": self._cli_id, "started": self._started}
+
+    def start(self, sink: Sink, cli_id: str, cols: int, rows: int, resume: bool) -> None:
+        if self._host is not None:
+            self.attach(sink, cols, rows)
+            return
+        exe = self._find(cli_id)
+        cli = cli_mod.CLIS[cli_id]
+        wrote = cli_mod.write_mcp_file(self._store.mcp_path, self._comfy_port())
+        mcp = self._store.mcp_path if wrote else None
+        argv = cli_mod.build_argv(cli, exe, mcp, resume)
+        env = cli_mod.build_env(os.environ)
+        host = self._host_factory()
+        try:
+            host.start(
+                argv,
+                self._cwd,
+                env,
+                cols,
+                rows,
+                lambda data: self._on_output(host, data),
+                lambda code: self._on_exit(host, code),
+            )
+        except OSError as error:
+            message = error.strerror or str(error)
+            raise Refusal("spawn_failed", message) from error
+        now = self._clock()
+        self._host = host
+        self._cli_id = cli_id
+        self._started = time.time()
+        self._sink = sink
+        self._last_detach = now
+        self._last_output = now
+
+    def attach(self, sink: Sink, cols: int, rows: int) -> None:
+        if self._host is None:
+            return
+        previous = self._sink
+        if previous is not None and previous is not sink:
+            self._send_json(previous, {"type": "detached", "reason": "taken_over"})
+        self._sink = sink
+        self._host.resize(cols, rows)
+        self._host.nudge_redraw()
+
+    def detach(self, sink: Sink) -> None:
+        if sink is self._sink:
+            self._drop_sink()
+
+    def write(self, sink: Sink, data: bytes) -> None:
+        if self._host is not None and sink is self._sink:
+            self._host.write(data)
+
+    def resize(self, sink: Sink, cols: int, rows: int) -> None:
+        if self._host is not None and sink is self._sink:
+            self._host.resize(cols, rows)
+
+    def drained(self, sink: Sink) -> None:
+        if self._host is not None and sink is self._sink:
+            self._host.resume_output()
+
+    async def stop(self, reason: str) -> None:
+        host, sink = self._host, self._sink
+        if host is None:
+            return
+        self._clear()
+        await host.kill()
+        if sink is not None:
+            self._send_json(sink, {"type": "detached", "reason": reason})
+
+    async def tick(self) -> None:
+        if self._host is None or self._sink is not None:
+            return
+        now = self._clock()
+        if now - self._last_detach >= DETACHED_LIMIT_SECONDS:
+            await self.stop("limit")
+        elif now - max(self._last_detach, self._last_output) >= IDLE_SECONDS:
+            await self.stop("idle")
+
+    def _find(self, cli_id: str) -> Path:
+        try:
+            return cli_mod.find(cli_id)
+        except KeyError as error:
+            raise Refusal("cli_not_found", f"Unknown CLI: {cli_id}") from error
+        except cli_mod.CliNotFound as error:
+            raise Refusal("cli_not_found", str(error)) from error
+
+    def _on_output(self, host: Any, data: bytes) -> None:
+        if host is not self._host:
+            return
+        self._last_output = self._clock()
+        sink = self._sink
+        if sink is None:
+            return
+        try:
+            sink.send_bytes(data)
+            backlog = sink.buffered()
+        except Exception:
+            self._drop_sink()
+            return
+        if backlog > HIGH_WATER:
+            host.pause_output()
+
+    def _on_exit(self, host: Any, code: int) -> None:
+        if host is not self._host:
+            return
+        sink = self._sink
+        self._clear()
+        if sink is not None:
+            self._send_json(sink, {"type": "exit", "code": code})
+
+    def _drop_sink(self) -> None:
+        self._sink = None
+        self._last_detach = self._clock()
+
+    def _clear(self) -> None:
+        self._host = None
+        self._sink = None
+        self._cli_id = ""
+
+    def _send_json(self, sink: Sink, message: dict) -> None:
+        try:
+            sink.send_json(message)
+        except Exception:
+            if sink is self._sink:
+                self._drop_sink()
