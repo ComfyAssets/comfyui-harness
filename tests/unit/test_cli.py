@@ -396,3 +396,54 @@ def test_the_file_is_still_owner_only(tmp_path):
         tmp_path / "mcp.json", URL, which={}.get, canvas_secret=SECRET, **lookup(tmp_path)
     )
     assert stat.S_IMODE((tmp_path / "mcp.json").stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8188",
+        "http://127.0.0.2:8188",
+        "http://localhost:8188",
+        "http://[::1]:8188",
+    ],
+)
+def test_the_canvas_entry_is_written_for_loopback_urls(tmp_path, url):
+    got = write_mcp_file(
+        tmp_path / "mcp.json", url, which={}.get, canvas_secret=SECRET, **lookup(tmp_path)
+    )
+    assert got.canvas
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://comfy.example:8188",
+        "http://192.168.1.5:8188",
+        "http://0.0.0.0:8188",
+        "http://[::]:8188",
+        "http://127.0.0.1.evil.example:8188",
+        "not a url",
+    ],
+)
+def test_no_canvas_entry_for_non_loopback_urls(tmp_path, url):
+    got = write_mcp_file(
+        tmp_path / "mcp.json", url, which={}.get, canvas_secret=SECRET, **lookup(tmp_path)
+    )
+    assert not got.canvas
+    assert not (tmp_path / "mcp.json").exists()
+
+
+@pytest.mark.parametrize(
+    "listen, expected",
+    [
+        ("0.0.0.0", "http://127.0.0.1:8188"),
+        ("::", "http://[::1]:8188"),
+        ("192.168.1.5", "http://192.168.1.5:8188"),
+        ("comfy.example", "http://comfy.example:8188"),
+        (None, "http://127.0.0.1:8188"),
+    ],
+)
+def test_comfy_url_for_listen_values(listen, expected):
+    from harness.cli import comfy_url
+
+    assert comfy_url(listen, 8188, False) == expected

@@ -647,3 +647,49 @@ def test_a_broken_sink_is_dropped_from_the_bridge(bmgr, bridge):
     sink.broken = True
     bmgr._on_output(bmgr._host, b"x")
     assert bridge.dropped == [sink]
+
+
+@pytest.mark.parametrize("target", ["build_argv", "build_env"])
+def test_a_failure_before_the_spawn_closes_the_bridge_session(bmgr, bridge, monkeypatch, target):
+    def boom(*a, **k):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(cli_mod, target, boom)
+    with pytest.raises(ValueError):
+        bmgr.start(FakeSink(), "claude", 80, 24, False)
+    assert bridge.opened == 1 and bridge.closed == 1
+    assert bmgr.info() is None
+
+
+def test_a_failing_host_factory_closes_the_bridge_session(store, clock, bridge):
+    def factory():
+        raise KeyError("no host")
+
+    mgr = SessionManager(factory, store, CWD, lambda: "http://127.0.0.1:8188", clock, bridge=bridge)
+    with pytest.raises(KeyError):
+        mgr.start(FakeSink(), "claude", 80, 24, False)
+    assert bridge.closed == 1
+
+
+def test_a_non_oserror_from_the_mcp_write_closes_the_bridge_session(bmgr, bridge, monkeypatch):
+    def boom(path, url, **kw):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(cli_mod, "write_mcp_file", boom)
+    with pytest.raises(ValueError):
+        bmgr.start(FakeSink(), "claude", 80, 24, False)
+    assert bridge.closed == 1
+
+
+def test_a_cancelled_start_closes_the_bridge_session(bmgr, host, bridge):
+    host.start_error = KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt):
+        bmgr.start(FakeSink(), "claude", 80, 24, False)
+    assert bridge.closed == 1
+
+
+def test_a_failed_spawn_closes_the_bridge_session_exactly_once(bmgr, host, bridge):
+    host.start_error = RuntimeError("no")
+    with pytest.raises(Refusal):
+        bmgr.start(FakeSink(), "claude", 80, 24, False)
+    assert bridge.closed == 1

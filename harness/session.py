@@ -78,11 +78,29 @@ class SessionManager:
         cli = cli_mod.CLIS[cli_id]
         secret = self._bridge.open_session() if self._bridge is not None else None
         try:
+            self._spawn(sink, cli_id, cli, exe, cols, rows, resume, secret)
+        except BaseException:
+            # No path may leave a live secret without a session.
+            self._close_bridge_session()
+            raise
+        log.info("session started: %s", cli_id)
+
+    def _spawn(
+        self,
+        sink: Sink,
+        cli_id: str,
+        cli: cli_mod.Cli,
+        exe: Path,
+        cols: int,
+        rows: int,
+        resume: bool,
+        secret: Optional[str],
+    ) -> None:
+        try:
             wrote = cli_mod.write_mcp_file(
                 self._store.mcp_path, self._comfy_url(), canvas_secret=secret
             )
         except OSError as error:
-            self._close_bridge_session()
             reason = error.strerror or type(error).__name__
             raise Refusal("spawn_failed", f"Could not write the MCP config: {reason}") from error
         mcp = self._store.mcp_path if wrote.any else None
@@ -111,13 +129,12 @@ class SessionManager:
             # Any failure (a missing program, a waiter thread that would not start)
             # must not leave a dead host behind for later starts to attach to.
             if self._host is host:
-                self._clear()
+                self._reset()
             if isinstance(error, OSError):
                 message = error.strerror or str(error)
             else:
                 message = type(error).__name__
             raise Refusal("spawn_failed", message) from error
-        log.info("session started: %s", cli_id)
 
     def attach(self, sink: Sink, cols: int, rows: int) -> None:
         if self._host is None:
@@ -223,6 +240,9 @@ class SessionManager:
 
     def _clear(self) -> None:
         self._close_bridge_session()
+        self._reset()
+
+    def _reset(self) -> None:
         self._host = None
         self._sink = None
         self._cli_id = ""

@@ -10,6 +10,7 @@ import os
 import secrets
 import shutil
 import sys
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Optional
@@ -160,6 +161,23 @@ class McpEntries:
         return self.comfy or self.canvas
 
 
+def _is_loopback_http(url: str) -> bool:
+    """Plain http to a loopback host only: the bearer token must never leave the machine."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return False
+    if parts.scheme != "http" or not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _canvas_entry(url: str, secret: str) -> dict:
     return {
         "type": "http",
@@ -187,7 +205,7 @@ def write_mcp_file(
         if comfy is not None:
             env["COMFY_BIN"] = comfy
         servers[MCP_SERVER] = {"command": str(server), "env": env}
-    if canvas_secret is not None and not url.startswith("https://"):
+    if canvas_secret is not None and _is_loopback_http(url):
         servers[CANVAS_SERVER] = _canvas_entry(url, canvas_secret)
     entries = McpEntries(comfy=MCP_SERVER in servers, canvas=CANVAS_SERVER in servers)
     if not entries.any:
