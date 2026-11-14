@@ -1,6 +1,7 @@
 // The drop-down panel and its states. Side-effect free at import.
 // Everything is built with createElement/textContent; server text may echo input.
 import { IDS, clamp } from "./settings.js";
+import { styleButton } from "./style.js";
 
 export const STOPPED_EVENTS = ["keydown", "keyup", "keypress", "paste", "copy", "cut", "wheel", "pointerdown", "mousedown", "contextmenu"];
 
@@ -94,9 +95,8 @@ export function createPanel({ document, matchMedia = () => ({ matches: false }),
   css(title, { fontWeight: "bold" });
   const notice = make("span");
   css(notice, { flex: "1 1 auto", display: "flex", gap: "8px", alignItems: "center" });
-  const close = make("button", "×");
+  const close = styleButton(make("button", "×"), "icon");
   close.setAttribute("aria-label", "Close terminal");
-  close.setAttribute("type", "button");
   close.addEventListener("click", () => onClose());
   header.append(title, notice, close);
 
@@ -150,8 +150,7 @@ export function createPanel({ document, matchMedia = () => ({ matches: false }),
     }
     const parts = [make("p", view.message ?? "")];
     if (view.action && ACTION_LABELS[view.action]) {
-      const button = make("button", ACTION_LABELS[view.action]);
-      button.setAttribute("type", "button");
+      const button = styleButton(make("button", ACTION_LABELS[view.action]), "primary");
       button.addEventListener("click", () => onAction(view.action));
       parts.push(button);
     }
@@ -162,16 +161,14 @@ export function createPanel({ document, matchMedia = () => ({ matches: false }),
   function notify(text, button) {
     const parts = [make("span", text)];
     if (button) {
-      const act = make("button", button.label);
-      act.setAttribute("type", "button");
+      const act = styleButton(make("button", button.label), "primary");
       act.addEventListener("click", () => {
         notice.replaceChildren();
         button.onClick();
       });
       parts.push(act);
     }
-    const dismiss = make("button", "Dismiss");
-    dismiss.setAttribute("type", "button");
+    const dismiss = styleButton(make("button", "Dismiss"), "secondary");
     dismiss.addEventListener("click", () => notice.replaceChildren());
     notice.replaceChildren(...parts, dismiss);
   }

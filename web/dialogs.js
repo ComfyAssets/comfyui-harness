@@ -1,5 +1,6 @@
 // The pairing popup. Built with createElement/textContent only: server text can echo input.
 import { requestPairing, pollPairing } from "./client.js";
+import { TOKENS, css, styleButton } from "./style.js";
 
 export const DISCLOSURE = [
   "This starts a program on the machine running ComfyUI. It can read and change files there and use the CLI's stored login.",
@@ -13,6 +14,23 @@ const POLL_MS = 2000;
 const COUNTDOWN_MS = 1000;
 const REJECTED_TEXT = "That code was not accepted. Request a new one.";
 const RETRYING_TEXT = "Connection lost, retrying";
+const Z_INDEX = "10001";
+
+const BACKDROP = {
+  position: "fixed", inset: "0", zIndex: Z_INDEX, display: "none",
+  alignItems: "center", justifyContent: "center", padding: "16px",
+  background: "rgba(0, 0, 0, 0.5)", boxSizing: "border-box",
+};
+const CARD = {
+  position: "relative", display: "flex", flexDirection: "column", gap: "14px",
+  width: "560px", maxWidth: "92vw", maxHeight: "90vh", overflowY: "auto", boxSizing: "border-box",
+  padding: "20px 22px", background: TOKENS.surface, color: TOKENS.text,
+  border: `1px solid ${TOKENS.border}`, borderRadius: "16px", boxShadow: TOKENS.shadow,
+  fontFamily: TOKENS.font, fontSize: "14px", lineHeight: "1.45",
+};
+const MUTED = { margin: "0", color: TOKENS.muted, fontSize: "13px" };
+const CAPTION = { ...MUTED, fontSize: "11px", fontWeight: "600", letterSpacing: "0.06em", textTransform: "uppercase" };
+const BOX = { background: TOKENS.panel, border: `1px solid ${TOKENS.border}`, borderRadius: "10px" };
 
 export function createPairingDialog({
   document,
@@ -28,22 +46,41 @@ export function createPairingDialog({
     return el;
   };
 
-  const element = make("div");
-  element.setAttribute("role", "dialog");
-  element.setAttribute("aria-label", "Pair this browser");
-  element.style.display = "none";
+  const styled = (tag, text, styles) => css(make(tag, text), styles);
+  const button = (text, variant) => styleButton(make("button", text), variant);
 
-  const heading = make("h2", "Pair this browser");
-  const list = make("ul");
+  const element = styled("div", undefined, BACKDROP);
+  element.setAttribute("role", "dialog");
+  element.setAttribute("aria-modal", "true");
+  element.setAttribute("aria-label", "Pair this browser");
+  const card = styled("div", undefined, CARD);
+  element.append(card);
+
+  const header = styled("div", undefined, { display: "flex", alignItems: "center", gap: "12px" });
+  const heading = styled("h2", "Pair this browser", { margin: "0", flex: "1 1 auto", fontSize: "18px", fontWeight: "600" });
+  const closeX = button("×", "icon");
+  closeX.setAttribute("aria-label", "Close pairing dialog");
+  header.append(heading, closeX);
+
+  const notice = styled("div", undefined, { ...BOX, padding: "10px 14px" });
+  const list = styled("ul", undefined, { margin: "0", paddingLeft: "18px", display: "grid", gap: "6px", fontSize: "13px" });
   for (const line of DISCLOSURE) list.appendChild(make("li", line));
-  const label = make("label");
+  notice.append(list);
+
+  const label = styled("label", undefined, {
+    display: "flex", alignItems: "center", gap: "10px", cursor: "pointer", fontWeight: "600",
+  });
   const box = make("input");
   box.setAttribute("type", "checkbox");
+  css(box, { width: "16px", height: "16px", margin: "0", accentColor: TOKENS.accent, cursor: "pointer" });
   box.checked = false;
-  label.append(box, make("span", " I understand and want to pair this browser"));
-  const body = make("div"); // code, commands, countdown, messages
-  const closeButton = make("button", "Close");
-  element.append(heading, list, label, body, closeButton);
+  label.append(box, make("span", "I understand and want to pair this browser"));
+
+  const body = styled("div", undefined, { display: "flex", flexDirection: "column", gap: "12px" });
+  const footer = styled("div", undefined, { display: "flex", justifyContent: "flex-end" });
+  const closeButton = button("Close", "secondary");
+  footer.append(closeButton);
+  card.append(header, notice, label, body, footer);
 
   // The poll secret lives only here, never in storage, the DOM or a URL.
   let pollSecret = null;
@@ -51,7 +88,7 @@ export function createPairingDialog({
   let countdownTimer = null;
   let remaining = 0;
   let generation = 0; // bumped on every stop so late replies are ignored
-  const connection = make("p"); // says so while polls fail on the network
+  const connection = styled("p", "", { ...MUTED, color: "var(--error-text, #ff8080)" }); // polls failing on the network
 
   function stopTimers() {
     generation += 1;
@@ -62,20 +99,27 @@ export function createPairingDialog({
     countdownTimer = null;
   }
 
+  const message = (text) => styled("p", text, { margin: "0" });
+
   function showMessage(text) {
-    body.replaceChildren(make("p", text));
+    body.replaceChildren(message(text));
   }
 
   function newCodeButton() {
-    const button = make("button", "Request a new code");
-    button.addEventListener("click", begin);
-    return button;
+    const again = button("Request a new code", "primary");
+    css(again, { alignSelf: "flex-start" });
+    again.addEventListener("click", begin);
+    return again;
   }
 
   function commandRow(title, command) {
-    const row = make("div");
-    const code = make("code", command);
-    const copy = make("button", "Copy");
+    const row = styled("div", undefined, { display: "flex", flexDirection: "column", gap: "6px" });
+    const line = styled("div", undefined, { display: "flex", alignItems: "center", gap: "8px" });
+    const code = styled("code", command, {
+      ...BOX, flex: "1 1 auto", minWidth: "0", padding: "8px 10px", background: TOKENS.input,
+      fontFamily: TOKENS.mono, fontSize: "12px", lineHeight: "1.5", wordBreak: "break-all", userSelect: "all",
+    });
+    const copy = button("Copy", "secondary");
     copy.addEventListener("click", async () => {
       try {
         await clipboard?.writeText(command);
@@ -83,27 +127,35 @@ export function createPairingDialog({
         // copying is a convenience; failure is silent
       }
     });
-    row.append(make("p", title), code, copy);
+    line.append(code, copy);
+    row.append(styled("p", title, CAPTION), line);
     return row;
   }
 
   function render(pending, countdown) {
     connection.textContent = "";
+    const codeRow = styled("div", undefined, {
+      ...BOX, display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", padding: "12px 16px",
+    });
+    const codeLabel = styled("div", undefined, { display: "flex", flexDirection: "column", gap: "4px" });
+    codeLabel.append(
+      styled("p", "Your code", CAPTION),
+      styled("code", pending.code, { fontFamily: TOKENS.mono, fontSize: "24px", fontWeight: "700", letterSpacing: "0.12em" }),
+    );
+    codeRow.append(codeLabel, countdown);
     body.replaceChildren(
-      make("p", "Your code:"),
-      make("code", pending.code),
-      countdown,
-      make("p", "Run this on the machine running ComfyUI:"),
+      codeRow,
+      message("Run this on the machine running ComfyUI:"),
       commandRow("Command", pending.command),
       commandRow("Inside Docker", pending.docker_command),
-      make("p", "Waiting for the code to be accepted..."),
+      styled("p", "Waiting for the code to be accepted...", MUTED),
       connection,
     );
   }
 
   function expire() {
     stopTimers();
-    body.replaceChildren(make("p", "That code expired."), newCodeButton());
+    body.replaceChildren(message("That code expired."), newCodeButton());
   }
 
   async function poll(myGeneration, secret) {
@@ -129,7 +181,7 @@ export function createPairingDialog({
       onPaired();
     } else if (state === "rejected") {
       stopTimers();
-      body.replaceChildren(make("p", REJECTED_TEXT), newCodeButton());
+      body.replaceChildren(message(REJECTED_TEXT), newCodeButton());
     } else if (state === "expired") {
       expire();
     }
@@ -149,7 +201,7 @@ export function createPairingDialog({
     if (myGeneration !== generation) return;
     pollSecret = pending.poll_secret;
     remaining = pending.expires_in;
-    const countdown = make("p");
+    const countdown = styled("p", undefined, { ...MUTED, whiteSpace: "nowrap" });
     const paint = () => {
       countdown.textContent = `Expires in ${remaining} s`;
     };
@@ -181,12 +233,13 @@ export function createPairingDialog({
   }
 
   closeButton.addEventListener("click", closeDialog);
+  closeX.addEventListener("click", closeDialog);
 
   return {
     element,
     open() {
       closeDialog();
-      element.style.display = "block";
+      element.style.display = "flex";
     },
     close: closeDialog,
   };

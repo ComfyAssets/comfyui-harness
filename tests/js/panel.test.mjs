@@ -217,3 +217,13 @@ test("the paired address matching this page shows the terminal", () => {
   const view = viewFor({ status: { ...READY, origin: "https://comfy.example" }, socket: "open", session: null, here: "https://comfy.example" });
   assert.equal(view.kind, "terminal");
 });
+
+test("panel buttons use ComfyUI's button style: the action is primary, × is an icon", () => {
+  const panel = createPanel(fakeEnv());
+  panel.show({ kind: "pair", message: "This browser is not paired.", action: "pair" });
+  panel.notify("note", { label: "Do it", onClick: () => {} });
+  const all = buttons(panel.element);
+  assert.equal(byText(panel.element, "Pair this browser", "BUTTON").style.background, "var(--primary-background)");
+  assert.equal(byText(panel.element, "×", "BUTTON").style.background, "transparent");
+  for (const b of all) assert.equal(b.style.cursor, "pointer", b.textContent);
+});

@@ -152,7 +152,7 @@ test("an unpaired browser gets the pairing popup, not the panel", async () => {
   const env = setup({ status: { supported: true, paired: false, enabled: false } });
   env.press({});
   await flush();
-  assert.equal(env.harness.dialog.element.style.display, "block");
+  assert.equal(env.harness.dialog.element.style.display, "flex");
   assert.equal(env.panel.isOpen(), false);
   assert.equal(env.loads(), 0);
 });
@@ -436,7 +436,7 @@ test("a refused handshake re-reads status and shows the pairing popup when unpai
   env.socket().drop(1006);
   await flush();
   assert.equal(statusFetches(env), before + 1);
-  assert.equal(env.harness.dialog.element.style.display, "block");
+  assert.equal(env.harness.dialog.element.style.display, "flex");
   assert.equal(env.panel.isOpen(), false);
   assert.equal(env.pending(), 0);
   assert.equal(FakeSocket.all.length, 1);

@@ -176,3 +176,10 @@ test("an unsupported platform sees a message and no buttons", () => {
   assert.equal(buttons(el).length, 0);
   assert.match(el.textContent, /Not supported on this platform/);
 });
+
+test("server row buttons use ComfyUI's style: pair is primary, revoke is destructive", () => {
+  const unpaired = renderServerRows({ document: fakeDocument(), io: fakeIo(), status: { supported: true, paired: false, enabled: true }, browsers: [], onPair: () => {} });
+  assert.equal(buttons(unpaired)[0].style.background, "var(--primary-background)");
+  const paired = renderServerRows({ document: fakeDocument(), io: fakeIo(), status: PAIRED, browsers: BROWSERS, onPair: () => {} });
+  for (const b of buttons(paired).filter((x) => x.textContent === "Revoke")) assert.equal(b.style.background, "var(--destructive-background)");
+});

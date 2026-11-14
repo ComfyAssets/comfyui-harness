@@ -471,6 +471,7 @@ terminal content are never logged. Display codes may be.
 | `panel.js` | The drop-down and its states. |
 | `client.js` | Status, pairing and switch calls; the WebSocket. |
 | `dialogs.js` | Pairing popup with disclosure. |
+| `style.js` | ComfyUI colour tokens and button styles shared by the popup, panel and settings rows. |
 | `settings.js` | Setting rows. |
 | `vendor/ghostty-web/ghostty-web.mjs` | Vendored ghostty-web 0.4.0. |
 

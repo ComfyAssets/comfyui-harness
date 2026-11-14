@@ -4,6 +4,7 @@
 // server every time and is never stored here.
 import { DEFAULTS, format, parse } from "./keys.js";
 import { revokeBrowser, setEnabled } from "./client.js";
+import { styleButton } from "./style.js";
 
 export const IDS = {
   openKey: "Harness.OpenKey",
@@ -126,7 +127,7 @@ export function renderServerRows({ document, io, status, browsers = [], onPair =
     return root;
   }
   if (!status.paired) {
-    const pair = make("button", "Pair this browser");
+    const pair = styleButton(make("button", "Pair this browser"), "primary");
     pair.addEventListener("click", () => onPair());
     root.append(pair);
     return root;
@@ -155,7 +156,7 @@ export function renderServerRows({ document, io, status, browsers = [], onPair =
   for (const browser of browsers) {
     const row = make("div");
     row.setAttribute("data-browser", String(browser.id));
-    const revoke = make("button", "Revoke");
+    const revoke = styleButton(make("button", "Revoke"), "destructive");
     revoke.addEventListener("click", () => act(() => revokeBrowser(io, browser.id)));
     row.append(make("span", String(browser.label)), make("span", ` ${browser.origin} `));
     row.append(make("span", `Last seen ${lastSeen(browser.last_seen)} `));

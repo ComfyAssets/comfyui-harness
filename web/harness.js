@@ -10,7 +10,6 @@ import { IDS, readSettings, registerSettings, renderServerRows } from "./setting
 const CLI = "claude";
 const THEME = Object.freeze({ background: "#101018", foreground: "#d0d4e0" });
 const VENDOR = "./vendor/ghostty-web/ghostty-web.mjs";
-const DIALOG_Z_INDEX = "10001";
 const RUNNING_OR_NEW = new Set([undefined, "running"]);
 
 // The theme background is always opaque: a transparent one leaves stale text on redraw.
@@ -20,15 +19,6 @@ export function terminalOptions(fontSize) {
 
 function defaultLoadTerminal() {
   return import(new URL(VENDOR, import.meta.url).href);
-}
-
-function styleDialog(element) {
-  Object.assign(element.style, {
-    position: "fixed", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
-    zIndex: DIALOG_Z_INDEX, maxWidth: "min(640px, 90vw)", maxHeight: "90vh", overflow: "auto",
-    padding: "16px", background: "#1c1c26", color: "#e0e0ea", border: "1px solid #404050",
-    borderRadius: "8px", fontFamily: "system-ui, sans-serif",
-  });
 }
 
 export function createHarness({
@@ -61,7 +51,6 @@ export function createHarness({
     document, io, setInterval: every, clearInterval: stopEvery,
     onPaired: () => open(),
   });
-  styleDialog(dialog.element);
   // The dialog is outside the panel, so stop the same events there too.
   for (const type of ["keydown", "keyup", "keypress", "paste", "wheel"]) {
     dialog.element.addEventListener(type, (event) => event.stopPropagation());

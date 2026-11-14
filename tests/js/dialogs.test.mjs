@@ -289,3 +289,78 @@ test("a poll refused for another reason still ends pairing", async () => {
   assert.ok(s.root.textContent.includes("Pairing needs HTTPS."));
   assert.equal(s.root.textContent.includes(RETRYING), false);
 });
+
+// --- layout: a modal card in ComfyUI's colours, not bare browser defaults ---
+
+const buttonsIn = (root) => root.find((e) => e.tagName === "BUTTON");
+
+test("the dialog is a full-page backdrop that is hidden until opened, then a flex centre", () => {
+  const s = setup();
+  assert.equal(s.root.style.display, "none");
+  assert.equal(s.root.style.position, "fixed");
+  assert.equal(s.root.style.inset, "0");
+  assert.equal(s.root.attributes["aria-modal"], "true");
+  s.dialog.open();
+  assert.equal(s.root.style.display, "flex");
+  s.dialog.close();
+  assert.equal(s.root.style.display, "none");
+});
+
+test("the card sits inside the backdrop with ComfyUI's surface and border", () => {
+  const s = setup();
+  const card = s.root.children[0];
+  assert.match(card.style.background, /--base-background/);
+  assert.match(card.style.border, /--interface-stroke/);
+  assert.equal(card.style.borderRadius, "16px");
+});
+
+test("every button is styled, none is a bare browser button", async () => {
+  const s = setup();
+  s.dialog.open();
+  await s.tick();
+  const all = buttonsIn(s.root);
+  assert.ok(all.length >= 4);
+  for (const b of all) {
+    assert.equal(b.attributes.type, "button", b.textContent);
+    assert.ok(b.style.background, b.textContent);
+    assert.equal(b.style.cursor, "pointer", b.textContent);
+  }
+});
+
+test("a labelled × in the header closes the dialog", async () => {
+  const s = setup();
+  s.dialog.open();
+  await s.tick();
+  const x = buttonsIn(s.root).find((b) => b.attributes["aria-label"] === "Close pairing dialog");
+  assert.equal(x.textContent, "×");
+  x.dispatch("click");
+  assert.equal(s.root.style.display, "none");
+  assert.equal(s.live().length, 0);
+});
+
+test("the pairing code is the first code element and stands out", async () => {
+  const s = setup();
+  s.dialog.open();
+  await s.tick();
+  const first = s.root.find((e) => e.tagName === "CODE")[0];
+  assert.equal(first.textContent, PAIR.code);
+  assert.match(first.style.fontFamily, /monospace/);
+  assert.ok(parseInt(first.style.fontSize, 10) >= 20);
+});
+
+test("commands wrap inside their box instead of running off the card", async () => {
+  const s = setup();
+  s.dialog.open();
+  await s.tick();
+  const command = s.root.find((e) => e.tagName === "CODE" && e.textContent === PAIR.command)[0];
+  assert.equal(command.style.wordBreak, "break-all");
+  assert.match(command.style.fontFamily, /monospace/);
+});
+
+test("request a new code is the primary action", async () => {
+  const s = setup({ polls: ["expired"] });
+  s.dialog.open();
+  await s.tick();
+  await s.poll();
+  assert.equal(s.byText("Request a new code", "BUTTON").style.background, "var(--primary-background)");
+});
