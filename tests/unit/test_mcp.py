@@ -410,3 +410,39 @@ async def test_unknown_tool_error_names_the_tool() -> None:
     assert reply.body is not None
     assert reply.body["error"]["code"] == -32602
     assert reply.body["error"]["message"] == 'Unknown tool "foo".'
+
+
+async def test_unknown_tool_name_is_truncated() -> None:
+    reply = await run(rpc("tools/call", {"name": "x" * 200, "arguments": {}}, id=5))
+    assert reply.body is not None
+    message = reply.body["error"]["message"]
+    assert message == f'Unknown tool "{"x" * 64}".'
+
+
+BIG = "9" * 400
+
+
+@pytest.mark.parametrize("typ", ["number", "integer"])
+@pytest.mark.parametrize(
+    "limits", [{}, {"minimum": 0}, {"maximum": 10}, {"minimum": 0, "maximum": 1.5}]
+)
+async def test_huge_integers_never_raise(typ: str, limits: dict) -> None:
+    schema = {
+        "type": "object",
+        "properties": {"n": {"type": typ, **limits}},
+    }
+    tools = [Tool("big", "d", schema)]
+    for sign in ("", "-"):
+        raw = (
+            '{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+            f'"params":{{"name":"big","arguments":{{"n":{sign}{BIG}}}}}}}'
+        ).encode()
+        reply = await handle(raw, tools, Recorder())
+        assert isinstance(reply, Reply)
+        assert reply.status == 200
+
+
+def test_validate_huge_integer_does_not_raise() -> None:
+    assert validate({"type": "number"}, 10**400) is None
+    assert validate({"type": "number", "maximum": 5}, 10**400) is not None
+    assert validate({"type": "integer", "minimum": 0}, -(10**400)) is not None

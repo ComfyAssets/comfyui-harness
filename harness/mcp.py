@@ -14,6 +14,7 @@ INVALID_REQUEST = -32600
 METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 
+MAX_NAME_ECHO = 64
 BRIDGE_FAILED = "The bridge failed. Try again."
 
 
@@ -56,7 +57,9 @@ def _is_type(name: str, value: Any) -> bool:
         return False
     if name == "integer":
         return isinstance(value, int)
-    return name == "number" and isinstance(value, (int, float)) and math.isfinite(value)
+    if isinstance(value, float):
+        return name == "number" and math.isfinite(value)
+    return name == "number" and isinstance(value, int)
 
 
 def _same(a: Any, b: Any) -> bool:
@@ -184,7 +187,7 @@ async def _tools_call(params: Any, request_id: Any, tools: Sequence[Tool], call:
         return _error(200, INVALID_PARAMS, "arguments must be an object", request_id)
     tool = next((t for t in tools if t.name == name), None)
     if tool is None:
-        return _error(200, INVALID_PARAMS, f'Unknown tool "{name}".', request_id)
+        return _error(200, INVALID_PARAMS, f'Unknown tool "{name[:MAX_NAME_ECHO]}".', request_id)
     problem = validate(tool.schema, arguments)
     if problem:
         return _result(request_id, _tool_result(problem, True))
