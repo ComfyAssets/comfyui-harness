@@ -1,7 +1,8 @@
 """The terminal WebSocket: one socket per page, carrying the single session.
 
 Binary frames are terminal bytes; text frames are small JSON messages. The
-program and its arguments never come from the page, only a CLI id.
+program and its arguments never come from the page, only a CLI id. The canvas
+bridge rides the same socket: `bridge` frames out, `bridge_reply` frames back.
 
 Nothing shown or typed in the terminal is logged, nor cookies or header values.
 """
@@ -14,6 +15,7 @@ from typing import Any, Callable, Coroutine, Deque, Optional, Protocol
 
 from aiohttp import WSMsgType, web
 
+from .bridge import MAX_REPLY
 from .guard import WS_CLOSE, Refusal
 from .pairing import COOKIE_IDLE, COOKIE_MAX
 from .session import HIGH_WATER, TICK_SECONDS
@@ -21,8 +23,9 @@ from .session import HIGH_WATER, TICK_SECONDS
 log = logging.getLogger("harness")
 
 HEARTBEAT_SECONDS = 25
+# aiohttp itself closes with 1009 on any frame over this, before our code sees it.
 MAX_BINARY_FRAME = 1 << 20
-MAX_TEXT_FRAME = 4096
+MAX_TEXT_FRAME = 4096  # every text frame but a bridge_reply, which may be MAX_REPLY
 MESSAGE_TOO_BIG = 1009
 CLOSE_GRACE = 5.0
 MIN_SIZE = 1
@@ -142,6 +145,10 @@ def _tell(sink: SocketSink, message: dict) -> None:
         pass
 
 
+class _TooBig(Exception):
+    """A text frame over its type's size limit; the socket closes with 1009."""
+
+
 def _bad(message: str) -> Refusal:
     return Refusal("bad_request", message)
 
@@ -197,6 +204,7 @@ class Terminal:
                     break
         finally:
             self._sockets.pop(sink, None)
+            self._drop(sink)
             manager.detach(sink)
             await sink.finish()
         return ws
@@ -206,6 +214,7 @@ class Terminal:
         targets = list(self._sockets)
         for sink in targets:
             sink.mute()
+            self._drop(sink)
         try:
             if self._manager is not None:
                 await self._manager.stop("disabled")
@@ -244,8 +253,14 @@ class Terminal:
             return WS_CLOSE["disabled"], "disabled"
         return None
 
+    def _drop(self, sink: SocketSink) -> None:
+        """Fail the bridge calls waiting on this socket. Synchronous, never awaits."""
+        if self._deps.bridge is not None:
+            self._deps.bridge.drop(sink)
+
     def _shut(self, sink: SocketSink, code: int, reason: str) -> None:
         sink.mute()
+        self._drop(sink)
         if self._manager is not None:
             self._manager.detach(sink)
         sink.close(code, reason)
@@ -264,14 +279,40 @@ class Terminal:
             return True
         if msg.type is not WSMsgType.TEXT:
             return True
-        if len(msg.data.encode("utf-8")) > MAX_TEXT_FRAME:
+        try:
+            message = self._text(msg.data)
+            if message["type"] == "bridge_reply":
+                self._bridge_reply(sink, message)
+            else:
+                await self._dispatch(manager, sink, message)
+        except _TooBig:
             sink.close(MESSAGE_TOO_BIG, "message too big")
             return False
-        try:
-            await self._dispatch(manager, sink, _parse(msg.data))
         except Refusal as refusal:
             _tell(sink, {"type": "error", "code": refusal.code, "message": refusal.message})
         return True
+
+    @staticmethod
+    def _text(data: str) -> dict:
+        """Parse a text frame under its type's size limit, measured in UTF-8 bytes."""
+        size = len(data.encode("utf-8"))
+        if size > MAX_REPLY:
+            raise _TooBig()
+        if size <= MAX_TEXT_FRAME:
+            return _parse(data)
+        try:
+            message = _parse(data)
+        except Refusal:
+            raise _TooBig() from None
+        if message["type"] != "bridge_reply":
+            raise _TooBig()
+        return message
+
+    def _bridge_reply(self, sink: SocketSink, message: dict) -> None:
+        """Hand a page's answer to the bridge; it drops any reply it is not waiting for."""
+        bridge = self._deps.bridge
+        if bridge is not None:
+            bridge.reply(sink, message)
 
     async def _dispatch(self, manager: Any, sink: SocketSink, message: dict) -> None:
         kind = message["type"]
@@ -315,6 +356,7 @@ class Terminal:
             targets = [sink for sink, owner in self._sockets.items() if owner == browser.id]
             for sink in targets:
                 sink.mute()
+                self._drop(sink)
             self._spawn("revoke", self._revoked(targets))
 
     async def _revoked(self, targets: list[SocketSink]) -> None:
