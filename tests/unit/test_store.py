@@ -83,7 +83,15 @@ def test_browsers_round_trip_with_spec_layout(tmp_path):
     browser = make_browser()
     s.update(lambda st: dataclasses.replace(st, browsers=(browser,)))
     raw = json.loads(s.state_path.read_text())
-    assert set(raw) == {"schema", "instance_id", "enabled", "browsers"}
+    assert set(raw) == {
+        "schema",
+        "instance_id",
+        "enabled",
+        "browsers",
+        "bridge_enabled",
+        "bridge_edits",
+        "bridge_runs",
+    }
     assert set(raw["browsers"][0]) == {
         "id",
         "token_sha256",
@@ -317,3 +325,55 @@ def test_bad_state_message_does_not_echo_file_bytes(tmp_path):
     with pytest.raises(StoreError) as e:
         Store(tmp_path).open()
     assert "secret" not in str(e.value) and "\\xfe" not in str(e.value)
+
+
+BRIDGE_KEYS = ("bridge_enabled", "bridge_edits", "bridge_runs")
+
+
+def write_state_file(data_dir: Path, raw: dict) -> None:
+    p = data_dir / "state.json"
+    p.write_text(json.dumps(raw))
+    p.chmod(0o600)
+
+
+def bridge_switches(state: State) -> tuple[bool, bool, bool]:
+    return (state.bridge_enabled, state.bridge_edits, state.bridge_runs)
+
+
+def test_new_state_has_the_bridge_off_edits_on_runs_off(tmp_path):
+    store = opened(tmp_path)
+    assert bridge_switches(store.state) == (False, True, False)
+
+
+def test_a_state_file_from_before_the_bridge_loads_with_defaults(tmp_path):
+    opened(tmp_path)
+    # written by the previous release: no bridge keys at all
+    write_state_file(
+        tmp_path,
+        {"schema": SCHEMA, "instance_id": "ab" * 4, "enabled": True, "browsers": []},
+    )
+    store = Store(tmp_path)
+    store.open()
+    assert store.state.enabled is True
+    assert bridge_switches(store.state) == (False, True, False)
+
+
+@pytest.mark.parametrize("key", BRIDGE_KEYS)
+@pytest.mark.parametrize("bad", [1, "true", None, []])
+def test_a_bridge_switch_that_is_not_a_boolean_is_a_bad_state(tmp_path, key, bad):
+    opened(tmp_path)
+    raw = {"schema": SCHEMA, "instance_id": "a", "enabled": True, "browsers": [], key: bad}
+    write_state_file(tmp_path, raw)
+    with pytest.raises(StoreError) as e:
+        Store(tmp_path).open()
+    assert e.value.code == "bad_state"
+
+
+def test_bridge_switches_survive_a_reopen(tmp_path):
+    store = opened(tmp_path)
+    store.update(
+        lambda s: dataclasses.replace(s, bridge_enabled=True, bridge_edits=False, bridge_runs=True)
+    )
+    reopened = Store(tmp_path)
+    reopened.open()
+    assert bridge_switches(reopened.state) == (True, False, True)
