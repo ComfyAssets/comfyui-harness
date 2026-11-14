@@ -54,6 +54,7 @@ export function createHarness({
   let terminal = null; // { term, fit } once loaded
   let loading = null;
   let opening = false;
+  let pendingResume = null; // a start chosen while the socket was down: false or true (resume)
 
   const panel = createPanel({ document, matchMedia, onClose: () => close(), onAction: (a) => act(a) });
   const dialog = createPairingDialog({
@@ -109,9 +110,16 @@ export function createHarness({
     if (boot !== null && message.boot !== boot) {
       boot = message.boot;
       session = { state: "restarted" };
+      pendingResume = null; // the user chooses again after a restart
       return;
     }
     boot = message.boot;
+    if (pendingResume !== null) {
+      sendStart(pendingResume);
+      pendingResume = null;
+      session = { state: "running" };
+      return;
+    }
     if (!RUNNING_OR_NEW.has(session?.state)) return; // waiting for the user to choose
     if (message.session === null || message.session === undefined) sendStart(false);
     else send({ type: "attach", ...size() });
@@ -142,7 +150,9 @@ export function createHarness({
         break;
       case "paired": {
         const browser = message.browser ?? {};
-        panel.notify(`New browser paired: ${browser.label} (${browser.origin})`, {
+        const label = browser.label || "Browser";
+        const origin = browser.origin || "unknown origin";
+        panel.notify(`New browser paired: ${label} (${origin})`, {
           label: "Revoke",
           onClick: () => revokeBrowser(io, browser.id).catch((error) => panel.showError(error.message)),
         });
@@ -160,6 +170,7 @@ export function createHarness({
     } else {
       socket = null;
       socketState = "closed";
+      pendingResume = null;
       if (code === 4401 && status) status = { ...status, paired: false };
       if (code === 4409 && status) status = { ...status, enabled: false };
       if (code === 4403) panel.showError("This page's origin was refused by the server.");
@@ -170,12 +181,18 @@ export function createHarness({
   function connect() {
     if (socket) return;
     socketState = "connecting";
-    socket = openSocket({
+    // Callbacks from a socket that has since been replaced (e.g. by "use here") are ignored.
+    let mine = null;
+    const current = (fn) => (value) => {
+      if (mine !== null && socket === mine) fn(value);
+    };
+    mine = openSocket({
       WebSocket: Socket, location, setTimeout: later, clearTimeout: cancel,
-      onMessage,
-      onBytes: (bytes) => terminal?.term.write(bytes),
-      onClose,
+      onMessage: current(onMessage),
+      onBytes: current((bytes) => terminal?.term.write(bytes)),
+      onClose: current(onClose),
     });
+    socket = mine;
   }
 
   function showPanel() {
@@ -227,17 +244,21 @@ export function createHarness({
       await open();
     } else if (action === "start" || action === "continue") {
       session = null;
+      const resume = action === "continue";
       if (socket && socketState === "open") {
-        sendStart(action === "continue");
+        sendStart(resume);
         session = { state: "running" };
       } else {
+        pendingResume = resume;
         connect();
       }
       render();
     } else if (action === "use_here") {
       session = null;
-      socket?.close();
+      pendingResume = null;
+      const old = socket;
       socket = null;
+      old?.close();
       connect();
       render();
     }
@@ -285,9 +306,15 @@ export function createHarness({
       } catch {
         current = null;
       }
-      holder.replaceChildren(renderServerRows({
-        document, io, status: current, browsers, onPair: () => dialog.open(), onChange: refresh,
-      }));
+      try {
+        holder.replaceChildren(renderServerRows({
+          document, io, status: current, browsers, onPair: () => dialog.open(), onChange: refresh,
+        }));
+      } catch (error) {
+        const message = document.createElement("p");
+        message.textContent = `Could not show the server settings: ${error?.message ?? error}`;
+        holder.replaceChildren(message);
+      }
     };
     refresh();
     return holder;

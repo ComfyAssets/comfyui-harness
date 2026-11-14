@@ -51,7 +51,8 @@ function fakeTerminalModule() {
   return mod;
 }
 
-function setup({ status = READY, values = {}, reduced = false } = {}) {
+function setup({ status = READY, values = {}, reduced = false, browsers = [] } = {}) {
+  const timers = [];
   FakeSocket.all = [];
   const state = { status };
   const document = fakeDocument();
@@ -61,7 +62,7 @@ function setup({ status = READY, values = {}, reduced = false } = {}) {
   const app = { ui: { settings: { addSetting: (s) => added.push(s), getSettingValue: (id) => values[id] } } };
   const io = fakeIo({
     "GET /status": () => state.status,
-    "GET /pair/browsers": () => [],
+    "GET /pair/browsers": () => browsers,
     "PUT /enabled": (init) => { state.status = { ...state.status, enabled: JSON.parse(init.body).enabled }; return undefined; },
   });
   const mod = fakeTerminalModule();
@@ -72,7 +73,7 @@ function setup({ status = READY, values = {}, reduced = false } = {}) {
     WebSocket: FakeSocket,
     location: { protocol: "https:", host: "comfy.example" },
     matchMedia: (q) => ({ matches: reduced && q === "(prefers-reduced-motion: reduce)" }),
-    setTimeout: () => 0, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {},
+    setTimeout: (fn) => { timers.push(fn); return timers.length; }, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {},
   });
   harness.install();
   const press = (fields) => {
@@ -81,7 +82,8 @@ function setup({ status = READY, values = {}, reduced = false } = {}) {
     return event;
   };
   const socket = () => FakeSocket.all.at(-1);
-  return { state, document, listeners, added, io, mod, loads: () => loads, harness, press, socket, panel: harness.panel, values };
+  const runTimers = () => { for (const fn of timers.splice(0)) fn(); };
+  return { runTimers, state, document, listeners, added, io, mod, loads: () => loads, harness, press, socket, panel: harness.panel, values };
 }
 
 async function openReady(options) {
@@ -321,4 +323,61 @@ test("a missing CLI shows where it looked and does not connect", async () => {
   const env = await openReady({ status: { ...READY, cli_found: false } });
   assert.match(env.panel.element.textContent, /~\/\.local\/bin/);
   assert.equal(FakeSocket.all.length, 0);
+});
+
+// --- fix round 1 ---
+
+test("a replaced socket's late close does not orphan the new one", async () => {
+  const env = await openReady();
+  const old = env.socket();
+  old.receive({ type: "hello", boot: "b1", session: null });
+  old.receive({ type: "detached", reason: "taken_over" });
+  byText(env.panel.element, "Use here", "BUTTON").click();
+  const fresh = env.socket();
+  assert.notEqual(fresh, old);
+  fresh.receive({ type: "hello", boot: "b1", session: { cli: "claude" } });
+  old.drop(1000); // the old socket's close arrives after the new one is live
+  env.mod.terms[0].dataCb("a");
+  assert.deepEqual([...fresh.sent.at(-1)], [97]);
+  assert.equal(env.panel.element.textContent.includes("another page"), false);
+  assert.equal(env.panel.element.textContent.includes("Reconnecting"), false);
+  assert.equal(byText(env.panel.element, "Use here", "BUTTON"), undefined);
+});
+
+test("a paired notice without label or origin uses placeholders", async () => {
+  const env = await openReady();
+  env.socket().receive({ type: "paired", browser: { id: "q" } });
+  assert.ok(byText(env.panel.element, "New browser paired: Browser (unknown origin)"));
+});
+
+test("start again while reconnecting is sent on the next hello", async () => {
+  const env = await openReady();
+  env.socket().receive({ type: "hello", boot: "b1", session: null });
+  env.socket().receive({ type: "exit", code: 1 });
+  env.socket().drop(1006);
+  byText(env.panel.element, "Start again", "BUTTON").click();
+  env.runTimers();
+  const next = env.socket();
+  next.receive({ type: "hello", boot: "b1", session: null });
+  assert.deepEqual(next.json().at(-1), { type: "start", cli: "claude", cols: 80, rows: 24, resume: false });
+});
+
+test("continue while reconnecting keeps the resume flag for the next hello", async () => {
+  const env = await openReady();
+  env.socket().receive({ type: "hello", boot: "b1", session: null });
+  env.socket().receive({ type: "hello", boot: "b2", session: null });
+  env.socket().drop(1006);
+  byText(env.panel.element, "Start again and continue", "BUTTON").click();
+  env.runTimers();
+  const next = env.socket();
+  next.receive({ type: "hello", boot: "b2", session: null });
+  assert.deepEqual(next.json().at(-1), { type: "start", cli: "claude", cols: 80, rows: 24, resume: true });
+  assert.equal(next.json().filter((m) => m.type === "start").length, 1);
+});
+
+test("server rows show a rendering failure as text instead of rejecting", async () => {
+  const env = setup({ browsers: { not: "a list" } });
+  const holder = env.added.find((s) => s.id === "Harness.Server").type();
+  await flush();
+  assert.match(holder.textContent, /not iterable|Could not/);
 });
