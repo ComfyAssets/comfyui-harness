@@ -118,7 +118,8 @@ async def test_poll_sets_host_cookie_with_required_attributes(client, deps):
     assert raw.startswith(deps.pairing.cookie_name + "=")
     for attribute in ("Secure", "HttpOnly", "SameSite=Strict", "Path=/"):
         assert attribute in raw
-    assert f"Max-Age={30 * 86400}" in raw
+    # The server enforces the 30-day idle rule; the browser keeps the cookie for 90.
+    assert f"Max-Age={90 * 86400}" in raw
     assert "Domain" not in raw
 
 
@@ -241,6 +242,22 @@ async def test_delete_unknown_browser_is_not_found(client, deps):
 async def test_expired_cookie_is_not_paired(client, deps, clock):
     headers, _ = await pair(client, deps)
     clock.advance(COOKIE_IDLE + 1)
+    r = await client.get("/harness/pair/browsers", headers=same_origin(headers))
+    assert r.status == 401
+
+
+async def test_cookie_used_every_few_weeks_outlives_the_idle_window(client, deps, clock):
+    headers, _ = await pair(client, deps)
+    paired_at = clock.now
+    for day in (29, 58, 60):
+        clock.now = paired_at + day * 86400
+        r = await client.get("/harness/pair/browsers", headers=same_origin(headers))
+        assert r.status == 200, f"refused on day {day}"
+
+
+async def test_cookie_idle_for_31_days_is_refused(client, deps, clock):
+    headers, _ = await pair(client, deps)
+    clock.advance(31 * 86400)
     r = await client.get("/harness/pair/browsers", headers=same_origin(headers))
     assert r.status == 401
 

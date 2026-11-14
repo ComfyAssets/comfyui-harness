@@ -23,7 +23,7 @@ from .guard import (
     refusal_response,
     require_paired,
 )
-from .pairing import COOKIE_IDLE, Pairing
+from .pairing import COOKIE_MAX, Pairing
 from .session import SessionManager
 from .store import Browser, Store, StoreError
 from .terminal import Terminal
@@ -205,7 +205,7 @@ def setup(routes: web.RouteTableDef, deps: Deps, prefix: str = "/harness") -> No
             response.set_cookie(
                 pairing().cookie_name,
                 result.token,
-                max_age=COOKIE_IDLE,
+                max_age=COOKIE_MAX,
                 path="/",
                 secure=True,
                 httponly=True,
