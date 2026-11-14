@@ -1,6 +1,8 @@
 // Registers the ComfyUI extension. The only module that touches ComfyUI's app, and the
 // only module-level side effect is the single registerExtension call at the bottom.
 import { app } from "../../scripts/app.js";
+import { BridgeError } from "./bridge-edit.js";
+import { createBridge, errorsFrom, outputsFrom, refusalFrom, runStateFrom } from "./bridge.js";
 import { decide, isEditable } from "./keys.js";
 import { getStatus, listBrowsers, openSocket, revokeBrowser, setEnabled } from "./client.js";
 import { createPairingDialog } from "./dialogs.js";
@@ -21,6 +23,169 @@ function defaultLoadTerminal() {
   return import(new URL(VENDOR, import.meta.url).href);
 }
 
+const BRIDGE_FAILED = Object.freeze({ code: "failed", message: "The page could not do that." });
+const QUEUE_BUSY = "ComfyUI is already queueing a prompt. Try again in a moment.";
+
+// The canvas bridge's `host` (web/bridge.js, web/bridge-edit.js) over ComfyUI
+// frontend 1.59.1, from the calls verified in
+// docs/superpowers/plans/2026-11-14-canvas-bridge-frontend-notes.md. A thin
+// adapter: every rule lives in bridge*.js and is tested there with fakes.
+// This is the only place that reaches the frontend's internal Pinia stores
+// (`extensionManager._p._s`); public `app` getters are used where they exist.
+export function createComfyHost(comfy, win) {
+  const liteGraph = () => win?.LiteGraph ?? globalThis.LiteGraph;
+  const store = (id) => comfy.extensionManager?._p?._s?.get?.(id);
+  const workflows = () => comfy.extensionManager?.workflow;
+  const shown = () => comfy.canvas.graph; // root, or the subgraph the author opened; never app.graph
+  const activeTracker = () => {
+    const tracker = workflows()?.activeWorkflow?.changeTracker;
+    if (!tracker) throw new Error("no change tracker");
+    return tracker;
+  };
+  const types = () => store("nodeDef")?.nodeDefsByName ?? {};
+  const redraw = () => comfy.canvas?.setDirty?.(true, true);
+
+  function identity() {
+    const wf = workflows()?.activeWorkflow;
+    const graph = shown();
+    return {
+      workflow: wf ? (wf.isTemporary ? `tmp:${wf.instanceId}` : String(wf.path)) : "",
+      graph: graph === comfy.rootGraph ? "root" : String(graph?.id ?? ""),
+      name: String(wf?.filename ?? ""),
+    };
+  }
+
+  // Bound to the tab's own tracker: each workflow tab has one, and a tab
+  // switch makes isLatest false.
+  function tracker() {
+    const t = activeTracker();
+    return {
+      capture: () => t.captureCanvasState(),
+      depth: () => t.changeCount,
+      beforeChange: () => t.beforeChange(),
+      afterChange: () => {
+        t.afterChange();
+        redraw();
+      },
+      undo: () => t.undo(),
+      mark: () => t.undoQueue.at(-1),
+      isLatest: (token) => t.undoQueue.at(-1) === token && t.redoQueue.length === 0 && activeTracker() === t,
+      redoMark: () => t.redoQueue.at(-1),
+      clearRedo: () => {
+        t.redoQueue.length = 0;
+      },
+    };
+  }
+
+  // A copy in the tracker's own format: the whole root graph serialized, which
+  // also holds every subgraph's definition.
+  function snapshot() {
+    return JSON.parse(JSON.stringify(comfy.rootGraph.serialize()));
+  }
+
+  // Loads the copy back the way the tracker's own undo does (loadGraphData
+  // with the tracker marked as restoring, so no half-done state is recorded
+  // and the workflow's saved baseline is kept): push the copy as the newest
+  // undo state and undo once. The tracker re-opens the subgraph the author had
+  // open, as on any undo. Afterwards the undo history is as it was before the
+  // batch and the tracker's current state is the copy, so the next Ctrl+Z
+  // undoes the author's last step. The redo entry this adds (the half-done
+  // graph) is removed; older redo entries are kept.
+  async function restore(copy) {
+    const t = activeTracker();
+    const redoLength = t.redoQueue.length;
+    t.undoQueue.push(copy);
+    await t.undo();
+    if (t.undoQueue.at(-1) === copy) {
+      t.undoQueue.pop();
+      throw new Error("the canvas could not be restored");
+    }
+    if (t.redoQueue.length > redoLength) t.redoQueue.pop();
+    redraw();
+  }
+
+  function createNode(type) {
+    const node = liteGraph()?.createNode(type);
+    if (!node) return null;
+    shown().add(node);
+    return node;
+  }
+
+  function setWidget(node, widget, value) {
+    if (typeof widget.setValue === "function") {
+      widget.setValue(value, { e: undefined, node, canvas: comfy.canvas });
+    } else {
+      widget.value = value;
+      widget.callback?.(widget.value, comfy.canvas, node);
+    }
+    redraw();
+  }
+
+  // app.queuePrompt is the Run button's path but returns only a boolean; the
+  // prompt id is caught from app.api.queuePrompt, wrapped for this one call.
+  async function run() {
+    if (comfy.processingQueue) throw new BridgeError("busy", QUEUE_BUSY);
+    const api = comfy.api;
+    const original = api.queuePrompt;
+    let reply = null;
+    let refused = null;
+    api.queuePrompt = async function queueOnce(...args) {
+      try {
+        reply = await original.apply(this, args);
+        return reply;
+      } catch (error) {
+        refused = error;
+        throw error;
+      }
+    };
+    try {
+      await comfy.queuePrompt(0, 1);
+    } finally {
+      api.queuePrompt = original;
+    }
+    if (typeof reply?.prompt_id === "string") return { prompt_id: reply.prompt_id, number: reply.number };
+    return { errors: refusalFrom(refused?.response, comfy.lastNodeErrors) };
+  }
+
+  return {
+    graph: shown,
+    identity,
+    types,
+    tracker,
+    snapshot,
+    restore,
+    createNode,
+    removeNode: (node) => shown().remove(node),
+    connect: (from, outSlot, to, inSlot) => from.connect(outSlot, to, inSlot) ?? null,
+    disconnect: (node, inSlot) => node.disconnectInput(inSlot),
+    setWidget,
+    selection: () => Object.values(comfy.canvas.selected_nodes ?? {}),
+    errors: () =>
+      errorsFrom({
+        nodeErrors: comfy.lastNodeErrors,
+        executionError: comfy.lastExecutionError,
+        promptError: store("executionError")?.lastPromptError,
+        graph: shown(),
+        types: types(),
+      }),
+    outputs: () => outputsFrom(comfy.nodeOutputs),
+    runState: () => {
+      const execution = store("execution");
+      return runStateFrom({
+        activeJobId: execution?.activeJobId,
+        executingNodeId: execution?.executingNodeId ?? comfy.runningNodeId,
+        pending: store("queuePendingTaskCount")?.count,
+      });
+    },
+    run,
+    cancel: (promptId) => comfy.api.cancelJob(promptId),
+    viewCenter: () => {
+      const [x, y, w, h] = comfy.canvas.visible_area;
+      return [x + w / 2, y + h / 2];
+    },
+  };
+}
+
 export function createHarness({
   app: comfy,
   document,
@@ -34,6 +199,7 @@ export function createHarness({
   clearTimeout: cancel,
   setInterval: every,
   clearInterval: stopEvery,
+  host,
 }) {
   const encoder = new TextEncoder();
   let status = null;
@@ -55,6 +221,13 @@ export function createHarness({
   for (const type of ["keydown", "keyup", "keypress", "paste", "wheel"]) {
     dialog.element.addEventListener(type, (event) => event.stopPropagation());
   }
+
+  const bridge = createBridge({
+    host: host ?? createComfyHost(comfy, win),
+    notify: (text, button) => panel.notify(text, button),
+    setInterval: every,
+    clearInterval: stopEvery,
+  });
 
   const here = location?.origin ?? `${location?.protocol}//${location?.host}`;
   const render = () => panel.show(viewFor({ status, socket: socketState, session, here }));
@@ -120,8 +293,34 @@ export function createHarness({
     session = { state: "running" };
   }
 
+  // Answers on the socket the request came in on. Results and errors are
+  // never logged: they hold canvas content.
+  async function answerBridge(message) {
+    const { rid } = message;
+    if (typeof rid !== "string") return;
+    const from = socket;
+    let reply;
+    try {
+      const result = await bridge.handle(message.cmd, message.args);
+      reply = { type: "bridge_reply", rid, ok: true, result };
+    } catch (error) {
+      const known = error instanceof BridgeError;
+      reply = {
+        type: "bridge_reply",
+        rid,
+        ok: false,
+        error: known ? { code: error.code, message: error.message } : { ...BRIDGE_FAILED },
+      };
+    }
+    from?.send(reply);
+  }
+
   function onMessage(message) {
     if (!message || typeof message !== "object") return;
+    if (message.type === "bridge") {
+      answerBridge(message);
+      return;
+    }
     switch (message.type) {
       case "hello":
         socketState = "open";
@@ -358,6 +557,9 @@ export function createHarness({
     panel.setHeight(initial.height);
     panel.setOpacity(initial.opacity);
     win.addEventListener("keydown", onKeydown, true);
+    // The tracker announces every recorded change; an Undo notice that no
+    // longer applies goes at once instead of on its next timed check.
+    comfy.api?.addEventListener?.("graphChanged", () => bridge.check());
   }
 
   return { install, panel, dialog, open, close };

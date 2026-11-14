@@ -171,6 +171,10 @@ export function createPanel({ document, matchMedia = () => ({ matches: false }),
     const dismiss = styleButton(make("button", "Dismiss"), "secondary");
     dismiss.addEventListener("click", () => notice.replaceChildren());
     notice.replaceChildren(...parts, dismiss);
+    // Removes this notice, and only while it is still the one shown.
+    return () => {
+      if (notice.contains(dismiss)) notice.replaceChildren();
+    };
   }
 
   function showError(text) {

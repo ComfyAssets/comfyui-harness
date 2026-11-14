@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 import { fakeDocument, fakeEvent, fakeIo, byText, flush } from "./fake-dom.mjs";
 import { IDS } from "../../web/settings.js";
+import { fakeGraph } from "./fake-graph.mjs";
+import { fakeHost } from "./fake-host.mjs";
 
 // harness.js imports ComfyUI's app from "../../scripts/app.js". Point that at a fake.
 const registered = [];
@@ -52,7 +54,7 @@ function fakeTerminalModule() {
   return mod;
 }
 
-function setup({ status = READY, values = {}, reduced = false, browsers = [], testFlag } = {}) {
+function setup({ status = READY, values = {}, reduced = false, browsers = [], testFlag, host } = {}) {
   const timers = [];
   const delays = [];
   FakeSocket.all = [];
@@ -74,6 +76,7 @@ function setup({ status = READY, values = {}, reduced = false, browsers = [], te
     app, document, window, io,
     loadTerminal: async () => { loads++; return mod; },
     WebSocket: FakeSocket,
+    host,
     location: { protocol: "https:", host: "comfy.example" },
     matchMedia: (q) => ({ matches: reduced && q === "(prefers-reduced-motion: reduce)" }),
     setTimeout: (fn, ms) => { timers.push(fn); delays.push(ms); return timers.length; }, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {},
@@ -487,4 +490,91 @@ test("a refused handshake while the server is unreachable keeps retrying with ba
   assert.equal(env.pending(), 1);
   assert.deepEqual(env.delays, [1000]);
   assert.match(env.panel.element.textContent, /Reconnecting/);
+});
+
+// ------------------------------------------------------------ canvas bridge
+
+function bridgeHost(extra = {}) {
+  const host = fakeHost({ graph: fakeGraph({ nodes: [{ id: 1, type: "Note" }] }), types: { Note: { inputs: {}, outputs: [] } } });
+  return Object.assign(host, {
+    identity: () => ({ workflow: "workflows/a.json", graph: "root", name: "a" }),
+    selection: () => [],
+    errors: () => ({ nodes: [], execution: null, prompt: null, missing_types: [] }),
+    outputs: () => [],
+    runState: () => ({ state: "idle" }),
+    run: async () => ({ prompt_id: "p", number: 0 }),
+    cancel: async () => {},
+    ...extra,
+  });
+}
+
+const replies = (ws) => ws.json().filter((m) => m.type === "bridge_reply");
+
+test("a bridge frame is answered with a bridge_reply carrying the same rid", async () => {
+  const env = await openReady({ host: bridgeHost() });
+  const ws = env.socket();
+  ws.receive({ type: "hello", boot: "b1", session: null });
+  ws.receive({ type: "bridge", rid: "r1", cmd: "get_errors", args: {} });
+  await flush();
+  const [reply] = replies(ws);
+  assert.equal(reply.rid, "r1");
+  assert.equal(reply.ok, true);
+  assert.deepEqual(reply.result.run, { state: "idle" });
+  assert.equal(reply.result.workflow, "a");
+  assert.match(reply.result.fingerprint, /^fp_/);
+});
+
+test("a BridgeError becomes ok:false with its code and message", async () => {
+  const env = await openReady({ host: bridgeHost() });
+  const ws = env.socket();
+  ws.receive({ type: "bridge", rid: "r2", cmd: "nope", args: {} });
+  await flush();
+  assert.deepEqual(replies(ws), [
+    { type: "bridge_reply", rid: "r2", ok: false, error: { code: "invalid", message: "Unknown command." } },
+  ]);
+});
+
+test("any other error becomes code failed with no detail", async () => {
+  const host = bridgeHost({
+    errors: () => {
+      throw new Error("/home/someone/secret detail");
+    },
+  });
+  const env = await openReady({ host });
+  const ws = env.socket();
+  ws.receive({ type: "bridge", rid: "r3", cmd: "get_errors", args: {} });
+  await flush();
+  assert.deepEqual(replies(ws), [
+    { type: "bridge_reply", rid: "r3", ok: false, error: { code: "failed", message: "The page could not do that." } },
+  ]);
+});
+
+test("a bridge frame without a rid is ignored", async () => {
+  const env = await openReady({ host: bridgeHost() });
+  const ws = env.socket();
+  ws.receive({ type: "bridge", cmd: "get_errors", args: {} });
+  ws.receive({ type: "bridge", rid: 7, cmd: "get_errors", args: {} });
+  await flush();
+  assert.deepEqual(replies(ws), []);
+});
+
+test("bridge arguments that are not an object are treated as empty", async () => {
+  const env = await openReady({ host: bridgeHost() });
+  const ws = env.socket();
+  ws.receive({ type: "bridge", rid: "r4", cmd: "get_outline", args: null });
+  await flush();
+  assert.equal(replies(ws)[0].ok, true);
+});
+
+test("an edit from the bridge shows its notice in the panel with Undo", async () => {
+  const env = await openReady({ host: bridgeHost() });
+  const ws = env.socket();
+  ws.receive({ type: "bridge", rid: "r5", cmd: "get_outline", args: {} });
+  await flush();
+  const { fingerprint } = replies(ws)[0].result;
+  ws.receive({ type: "bridge", rid: "r6", cmd: "edit", args: { fingerprint, summary: "<b>rename</b>", ops: [{ op: "set_title", node: 1, title: "Hi" }] } });
+  await flush();
+  assert.equal(replies(ws)[1].ok, true);
+  assert.ok(byText(env.panel.element, "Claude: <b>rename</b>. Added 0, removed 0, changed 1"));
+  assert.ok(byText(env.panel.element, "Undo", "BUTTON"));
 });

@@ -102,6 +102,12 @@ export function fakeTracker(graph, log, faults = {}) {
     isLatest(token) {
       return t.undoQueue.at(-1) === token && t.redoQueue.length === 0;
     },
+    redoMark() {
+      return t.redoQueue.at(-1);
+    },
+    clearRedo() {
+      t.redoQueue.length = 0;
+    },
   };
   return t;
 }

@@ -609,6 +609,12 @@ approved continuing with them.
   entry, not the count; wait for undo and look nodes up again (6.6).
 - The notice's Undo works only while the agent's step is still the newest
   undo entry, nothing has been redone, and the same workflow tab is active.
+- Putting the canvas back from the copy loads it the way the tracker's own
+  undo does, so the undo history afterwards is as it was before the batch.
+  A batch rolled back by undo is dropped from the redo queue, so Ctrl+Y
+  cannot re-apply a failed edit.
+- The Undo notice is re-checked on the tracker's `graphChanged` event, on
+  every bridge command and once a second while it is shown.
 - The graph shown is the canvas's graph (root, or the opened subgraph).
   Node ids are strings. A workflow's stable identity for the fingerprint is
   its tab's instance id, which unsaved workflows also have.
