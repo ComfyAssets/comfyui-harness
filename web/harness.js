@@ -5,7 +5,7 @@ import { BridgeError } from "./bridge-edit.js";
 import { createBridge, errorsFrom, outputsFrom, refusalFrom, runStateFrom } from "./bridge.js";
 import { decide, isEditable } from "./keys.js";
 import { getStatus, listBrowsers, openSocket, revokeBrowser, setEnabled } from "./client.js";
-import { createPairingDialog } from "./dialogs.js";
+import { createBridgeDialog, createPairingDialog } from "./dialogs.js";
 import { createPanel, viewFor } from "./panel.js";
 import { IDS, readSettings, registerSettings, renderServerRows } from "./settings.js";
 
@@ -239,6 +239,24 @@ export function createHarness({
   for (const type of ["keydown", "keyup", "keypress", "paste", "wheel"]) {
     dialog.element.addEventListener(type, (event) => event.stopPropagation());
   }
+
+  // One consent dialog on the page body, so a rebuild of the settings rows cannot lose it.
+  let bridgeAccept = null;
+  const bridgeDialog = createBridgeDialog({
+    document,
+    onAccept: () => {
+      const accept = bridgeAccept;
+      bridgeAccept = null;
+      accept?.();
+    },
+  });
+  for (const type of ["keydown", "keyup", "keypress", "paste", "wheel"]) {
+    bridgeDialog.element.addEventListener(type, (event) => event.stopPropagation());
+  }
+  const openBridgeDialog = (accept) => {
+    bridgeAccept = accept;
+    bridgeDialog.open();
+  };
 
   const bridge = createBridge({
     host: host ?? createComfyHost(comfy, win),
@@ -514,7 +532,7 @@ export function createHarness({
 
   function onKeydown(event) {
     const target = event.target;
-    const inPanel = Boolean(target && (panel.element.contains(target) || dialog.element.contains(target)));
+    const inPanel = Boolean(target && (panel.element.contains(target) || dialog.element.contains(target) || bridgeDialog.element.contains(target)));
     const action = decide({
       event,
       bindings: readSettings(comfy).bindings,
@@ -567,7 +585,7 @@ export function createHarness({
       }
       try {
         holder.replaceChildren(renderServerRows({
-          document, io, status: current, browsers, onPair: () => dialog.open(), onChange: refresh, onRestart: restartSession,
+          document, io, status: current, browsers, onPair: () => dialog.open(), onChange: refresh, onRestart: restartSession, openBridgeDialog,
         }));
       } catch (error) {
         const message = document.createElement("p");
@@ -580,7 +598,7 @@ export function createHarness({
   }
 
   function install() {
-    document.body.append(panel.element, dialog.element);
+    document.body.append(panel.element, dialog.element, bridgeDialog.element);
     registerSettings(comfy, { onChange: applySetting, serverRows });
     const initial = readSettings(comfy);
     panel.setHeight(initial.height);

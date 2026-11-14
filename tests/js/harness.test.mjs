@@ -402,6 +402,61 @@ test("Start again in the Canvas rows sends stop then start with resume true", as
   ]);
 });
 
+const BRIDGE_OFF = { ...READY, bridge_enabled: false, bridge_edits: true, bridge_runs: false, bridge_available: true, bridge_reason: "", bridge_live: false };
+const bridgeDialogOf = (env) => env.document.body.find((e) => e.attributes.role === "dialog" && e.attributes["aria-label"] === "Turn on the canvas bridge")[0];
+const bridgeSwitch = (holder) => holder.find((e) => e.tagName === "LABEL" && e.textContent === "Canvas bridge")[0].find((e) => e.tagName === "INPUT")[0];
+
+test("one consent dialog lives on the page body and the rows hold none", async () => {
+  const env = setup({ status: BRIDGE_OFF });
+  assert.ok(bridgeDialogOf(env));
+  const holder = env.added.find((s) => s.id === "Harness.Server").type();
+  await flush();
+  assert.equal(holder.find((e) => e.attributes["aria-label"] === "Turn on the canvas bridge").length, 0);
+});
+
+test("the switch opens the body dialog, Turn on sets the bridge and refreshes", async () => {
+  const env = setup({ status: BRIDGE_OFF });
+  const puts = [];
+  const real = env.io.fetch;
+  env.io.fetch = async (url, init = {}) => { if (init.method === "PUT") puts.push([url, init.body]); return real(url, init); };
+  const holder = env.added.find((s) => s.id === "Harness.Server").type();
+  await flush();
+  const gets = () => env.io.calls.filter((c) => c.url === "/harness/status").length;
+  const before = gets();
+  const box = bridgeSwitch(holder);
+  box.checked = true;
+  box.dispatch("change");
+  assert.equal(bridgeDialogOf(env).style.display, "flex");
+  assert.deepEqual(puts, []);
+  byText(bridgeDialogOf(env), "Turn on", "BUTTON").click();
+  await flush();
+  assert.deepEqual(puts, [["/harness/bridge", JSON.stringify({ enabled: true })]]);
+  assert.ok(gets() > before);
+});
+
+test("a re-render of the rows while the dialog is open leaves it open", async () => {
+  const env = setup({ status: BRIDGE_OFF });
+  const holder = env.added.find((s) => s.id === "Harness.Server").type();
+  await flush();
+  const box = bridgeSwitch(holder);
+  box.checked = true;
+  box.dispatch("change");
+  // Another switch triggers a refresh that rebuilds the rows.
+  const edits = holder.find((e) => e.tagName === "LABEL" && e.textContent === "Allow edits")[0].find((e) => e.tagName === "INPUT")[0];
+  edits.checked = false;
+  edits.dispatch("change");
+  await flush();
+  assert.equal(bridgeDialogOf(env).style.display, "flex");
+  assert.ok(bridgeDialogOf(env).isConnected);
+});
+
+test("keys pressed in the consent dialog do not reach the page", () => {
+  const env = setup({ status: BRIDGE_OFF });
+  const event = fakeEvent("keydown", { key: "a" });
+  bridgeDialogOf(env).dispatch(event);
+  assert.equal(event.stopped, true);
+});
+
 test("Start again without an open terminal says so and sends nothing", async () => {
   const status = { ...READY, bridge_enabled: true, bridge_edits: true, bridge_runs: false, bridge_available: true, bridge_reason: "", bridge_live: false, session: { cli: "claude" } };
   const env = setup({ status });

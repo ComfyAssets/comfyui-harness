@@ -286,9 +286,18 @@ export function createBridgeDialog({ document, onAccept = () => {} }) {
   footer.append(cancel, accept);
   card.append(header, notice, footer);
 
+  let returnFocus = null;
   const close = () => {
+    const wasOpen = element.style.display === "flex";
     element.style.display = "none";
+    if (wasOpen) returnFocus?.focus?.();
+    returnFocus = null;
   };
+  element.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.stopPropagation?.();
+    close();
+  });
   cancel.addEventListener("click", close);
   closeX.addEventListener("click", close);
   accept.addEventListener("click", () => {
@@ -299,7 +308,9 @@ export function createBridgeDialog({ document, onAccept = () => {} }) {
   return {
     element,
     open() {
+      if (element.style.display !== "flex") returnFocus = document.activeElement ?? null;
       element.style.display = "flex";
+      accept.focus?.();
     },
     close,
   };

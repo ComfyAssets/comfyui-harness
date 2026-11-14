@@ -406,3 +406,41 @@ test("Turn on accepts and closes; Cancel and × only close", () => {
   assert.equal(accepted, 1);
   assert.equal(dialog.element.style.display, "none");
 });
+
+function focusDocument() {
+  const doc = {
+    activeElement: null,
+    createElement: (t) => { const e = fakeDocument.createElement(t); e.focus = () => { doc.activeElement = e; }; return e; },
+  };
+  return doc;
+}
+
+test("Escape closes the bridge dialog like Cancel and does not propagate", () => {
+  let accepted = 0;
+  const dialog = createBridgeDialog({ document: fakeDocument, onAccept: () => accepted++ });
+  dialog.open();
+  let stopped = false;
+  dialog.element.dispatch("keydown", { key: "Escape", stopPropagation: () => { stopped = true; } });
+  assert.equal(dialog.element.style.display, "none");
+  assert.equal(accepted, 0);
+  assert.equal(stopped, true);
+});
+
+test("other keys in the bridge dialog do not close it", () => {
+  const dialog = createBridgeDialog({ document: fakeDocument });
+  dialog.open();
+  dialog.element.dispatch("keydown", { key: "a" });
+  assert.equal(dialog.element.style.display, "flex");
+});
+
+test("the bridge dialog takes focus on open and gives it back on close", () => {
+  const doc = focusDocument();
+  const before = doc.createElement("button");
+  before.focus();
+  const dialog = createBridgeDialog({ document: doc });
+  dialog.open();
+  const turnOn = dialog.element.find((e) => e.tagName === "BUTTON" && e.textContent === "Turn on")[0];
+  assert.equal(doc.activeElement, turnOn);
+  dialog.close();
+  assert.equal(doc.activeElement, before);
+});

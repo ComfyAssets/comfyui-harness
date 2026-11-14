@@ -222,7 +222,12 @@ const switchFor = (el, name) => {
   return label.find((e) => e.tagName === "INPUT")[0];
 };
 const bridgeDialogEl = (el) => el.find((e) => e.attributes.role === "dialog")[0];
-const dialogButton = (el, text) => bridgeDialogEl(el).find((e) => e.tagName === "BUTTON" && e.textContent === text)[0];
+// A stand-in opener: records each request and lets the test accept it.
+const opener = () => {
+  const o = { opened: 0, accept: null };
+  o.openBridgeDialog = (accept) => { o.opened++; o.accept = accept; };
+  return o;
+};
 const flip = (box, on) => { box.checked = on; box.dispatch("change"); };
 
 test("the Canvas rows show a heading, three switches and the honesty line", () => {
@@ -236,30 +241,34 @@ test("the Canvas rows show a heading, three switches and the honesty line", () =
   assert.ok(byText(el, "These are settings the harness honours. They do not restrain the agent itself, which runs as your account."));
 });
 
-test("turning the bridge on opens the dialog and calls nothing until Turn on is pressed", async () => {
+test("the rows create no dialog element", () => {
+  const { el } = render(BRIDGE, { openBridgeDialog: () => {} });
+  assert.equal(bridgeDialogEl(el), undefined);
+});
+
+test("turning the bridge on calls the opener and nothing else until it accepts", async () => {
   let refreshed = 0;
-  const { el, io } = render(BRIDGE, { onChange: () => refreshed++ });
-  assert.equal(bridgeDialogEl(el).style.display, "none");
+  const o = opener();
+  const { el, io } = render(BRIDGE, { onChange: () => refreshed++, openBridgeDialog: o.openBridgeDialog });
   const box = switchFor(el, "Canvas bridge");
   flip(box, true);
   await flush();
-  assert.equal(bridgeDialogEl(el).style.display, "flex");
+  assert.equal(o.opened, 1);
   assert.equal(box.checked, false);
   assert.deepEqual(io.calls, []);
-  dialogButton(el, "Turn on").click();
+  o.accept();
   await flush();
   assert.deepEqual(io.calls.map((c) => [c.method, c.url, c.body]), [["PUT", "/harness/bridge", JSON.stringify({ enabled: true })]]);
   assert.equal(refreshed, 1);
 });
 
-test("Cancel leaves the switch off and makes no request", async () => {
-  const { el, io } = render(BRIDGE);
+test("never accepting leaves the switch off and makes no request", async () => {
+  const o = opener();
+  const { el, io } = render(BRIDGE, { openBridgeDialog: o.openBridgeDialog });
   const box = switchFor(el, "Canvas bridge");
   flip(box, true);
-  dialogButton(el, "Cancel").click();
   await flush();
   assert.equal(box.checked, false);
-  assert.equal(bridgeDialogEl(el).style.display, "none");
   assert.deepEqual(io.calls, []);
 });
 
@@ -269,7 +278,6 @@ test("turning the bridge off calls the server at once", async () => {
   flip(switchFor(el, "Canvas bridge"), false);
   await flush();
   assert.deepEqual(io.calls.map((c) => [c.method, c.url, c.body]), [["PUT", "/harness/bridge", JSON.stringify({ enabled: false })]]);
-  assert.equal(bridgeDialogEl(el).style.display, "none");
   assert.equal(refreshed, 1);
 });
 
@@ -327,20 +335,18 @@ test("an unavailable bridge shows the reason and no switches", () => {
     assert.ok(byText(el, text), reason);
     assert.equal(el.find((e) => e.tagName === "LABEL" && e.textContent === "Canvas bridge").length, 0);
     assert.equal(el.find((e) => e.tagName === "LABEL" && e.textContent === "Allow edits").length, 0);
-    assert.equal(bridgeDialogEl(el), undefined);
   }
 });
 
 test("the Canvas rows are absent for an unpaired browser", () => {
   const { el } = render({ supported: true, paired: false, enabled: true });
   assert.equal(byText(el, "Canvas", "H4"), undefined);
-  assert.equal(bridgeDialogEl(el), undefined);
 });
 
-test("every button in the Canvas rows and the dialog is styled", () => {
+test("every button in the Canvas rows is styled", () => {
   const { el } = render({ ...BRIDGE, bridge_enabled: true, session: { cli: "claude", started: 1 } });
   const all = buttons(el).filter((b) => b.textContent !== "Revoke");
-  assert.ok(all.length >= 4);
+  assert.ok(all.length >= 1);
   for (const b of all) {
     assert.equal(b.attributes.type, "button", b.textContent);
     assert.ok(b.style.background, b.textContent);

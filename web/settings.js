@@ -4,7 +4,6 @@
 // server every time and is never stored here.
 import { DEFAULTS, format, parse } from "./keys.js";
 import { revokeBrowser, setBridge, setBridgeEdits, setBridgeRuns, setEnabled } from "./client.js";
-import { createBridgeDialog } from "./dialogs.js";
 import { TOKENS, css, styleButton } from "./style.js";
 
 export const IDS = {
@@ -105,7 +104,7 @@ function lastSeen(seconds) {
   return Number.isNaN(date.getTime()) ? "unknown" : date.toLocaleString();
 }
 
-export function renderServerRows({ document, io, status, browsers = [], onPair = () => {}, onChange = () => {}, onRestart = async () => {} }) {
+export function renderServerRows({ document, io, status, browsers = [], onPair = () => {}, onChange = () => {}, onRestart = async () => {}, openBridgeDialog = () => {} }) {
   const make = (tag, text) => {
     const el = document.createElement(tag);
     if (text !== undefined) el.textContent = text;
@@ -211,7 +210,6 @@ export function renderServerRows({ document, io, status, browsers = [], onPair =
     if (!status.bridge_available) {
       return [heading, line(BRIDGE_REASONS[status.bridge_reason] ?? BRIDGE_REASONS.unsupported)];
     }
-    const dialog = createBridgeDialog({ document, onAccept: () => act(() => setBridge(io, true)) });
     const row = (name, checked, onToggle, note) => {
       const wrap = styled("div", undefined, { display: "flex", flexDirection: "column", gap: "2px" });
       const label = styled("label", undefined, { display: "flex", alignItems: "center", gap: "10px", cursor: "pointer", fontWeight: "600" });
@@ -230,7 +228,7 @@ export function renderServerRows({ document, io, status, browsers = [], onPair =
       if (input.checked) {
         // Nothing changes on the server until the disclosure is accepted.
         input.checked = false;
-        dialog.open();
+        openBridgeDialog(() => act(() => setBridge(io, true)));
       } else {
         act(() => setBridge(io, false));
       }
@@ -249,7 +247,6 @@ export function renderServerRows({ document, io, status, browsers = [], onPair =
       row("Allow runs", status.bridge_runs, (input) => act(() => setBridgeRuns(io, Boolean(input.checked))),
         "Lets the agent press Run when you ask it to. A run uses your GPU and writes output files, and cannot be undone."),
       styled("p", "These are settings the harness honours. They do not restrain the agent itself, which runs as your account.", MUTED),
-      dialog.element,
     );
     return rows;
   }
