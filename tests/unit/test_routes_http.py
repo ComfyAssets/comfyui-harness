@@ -31,7 +31,16 @@ async def test_status_for_paired_caller_adds_cli_and_session(client, deps):
         "cli_found": True,
         "mcp_found": False,
         "session": None,
+        "origin": ORIGIN,
     }
+
+
+# Found in Chromium: a page on another address of the same server carries the cookie,
+# reads as paired, and then retried a refused socket forever without saying why.
+async def test_status_for_paired_caller_names_the_paired_origin(client, deps):
+    headers, _ = await pair(client, deps, origin="http://127.0.0.1:8188")
+    body = await (await client.get("/harness/status", headers=same_origin(headers))).json()
+    assert body["origin"] == "http://127.0.0.1:8188"
 
 
 async def test_status_with_cookie_but_no_fetch_metadata_reads_as_unpaired(client, deps):

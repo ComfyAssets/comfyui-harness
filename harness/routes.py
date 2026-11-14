@@ -172,6 +172,8 @@ def setup(routes: web.RouteTableDef, deps: Deps, prefix: str = "/harness") -> No
         if browser is not None:
             body.update(deps.cli_status())
             body["session"] = None if deps.sessions is None else deps.sessions.info()
+            # The page compares this with its own address; the socket refuses others.
+            body["origin"] = browser.origin
         return web.json_response(body)
 
     @route("POST", "/pair/request")

@@ -47,10 +47,14 @@ function sessionView(session) {
   }
 }
 
-export function viewFor({ status, socket, session }) {
+export function viewFor({ status, socket, session, here }) {
   if (!status) return { kind: "reconnecting", message: "Reconnecting..." };
   if (!status.supported) return { kind: "unsupported", message: "Not supported on this platform" };
   if (!status.paired) return { kind: "pair", message: "This browser is not paired.", action: "pair" };
+  if (status.origin && here && status.origin !== here) {
+    const message = `This browser was paired from ${status.origin}. Open ComfyUI from that address.`;
+    return { kind: "wrong_origin", message };
+  }
   if (!status.enabled) return { kind: "disabled", message: "The terminal is switched off", action: "enable" };
   const fromSession = session ? sessionView(session) : null;
   if (fromSession) return fromSession;

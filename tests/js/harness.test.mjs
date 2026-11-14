@@ -397,3 +397,15 @@ test("turning the terminal back on starts a new session at once", async () => {
   assert.deepEqual(ws.json().at(-1), { type: "start", cli: "claude", cols: 80, rows: 24, resume: false });
   assert.equal(byText(env.panel.element, "Start again", "BUTTON"), undefined);
 });
+
+test("a page on another address than the paired one says so and does not connect", async () => {
+  const env = await openReady({ status: { ...READY, origin: "https://other.example" } });
+  assert.equal(env.panel.isOpen(), true);
+  assert.ok(byText(env.panel.element, "This browser was paired from https://other.example. Open ComfyUI from that address."));
+  assert.equal(FakeSocket.all.length, 0);
+});
+
+test("a page on the paired address connects", async () => {
+  await openReady({ status: { ...READY, origin: "https://comfy.example" } });
+  assert.equal(FakeSocket.all.length, 1);
+});

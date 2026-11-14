@@ -204,3 +204,16 @@ test("closing never leaves focus inside the hidden panel", () => {
   p.setOpen(false);
   assert.equal(p.element.contains(env.document.activeElement), false);
 });
+
+// Found in Chromium: a page on another address kept showing "Reconnecting...".
+test("a page on another address than the paired one is told which address to use", () => {
+  const view = viewFor({ status: { ...READY, origin: "http://127.0.0.1:8188" }, socket: "closed", session: null, here: "http://localhost:8188" });
+  assert.equal(view.kind, "wrong_origin");
+  assert.equal(view.message, "This browser was paired from http://127.0.0.1:8188. Open ComfyUI from that address.");
+  assert.equal(view.action, undefined);
+});
+
+test("the paired address matching this page shows the terminal", () => {
+  const view = viewFor({ status: { ...READY, origin: "https://comfy.example" }, socket: "open", session: null, here: "https://comfy.example" });
+  assert.equal(view.kind, "terminal");
+});

@@ -67,7 +67,10 @@ export function createHarness({
     dialog.element.addEventListener(type, (event) => event.stopPropagation());
   }
 
-  const render = () => panel.show(viewFor({ status, socket: socketState, session }));
+  const here = location?.origin ?? `${location?.protocol}//${location?.host}`;
+  const render = () => panel.show(viewFor({ status, socket: socketState, session, here }));
+  // The socket refuses a page on another address than the paired one; say so instead.
+  const wrongOrigin = () => Boolean(status?.origin) && status.origin !== here;
   const size = () => ({ cols: terminal?.term.cols ?? 80, rows: terminal?.term.rows ?? 24 });
   const send = (message) => socket?.send(message);
   const sendStart = (resume) => send({ type: "start", cli: CLI, ...size(), resume });
@@ -212,6 +215,7 @@ export function createHarness({
       }
       showPanel();
       if (!status || !status.supported || !status.enabled || status.cli_found === false) return;
+      if (wrongOrigin()) return;
       try {
         await ensureTerminal();
       } catch (error) {
