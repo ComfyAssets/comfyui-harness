@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+node_modules/
+.playwright-mcp/
+coverage/
+htmlcov/
+.coverage
+coverage.xml
+test-results/
+playwright-report/
+.superpowers/
