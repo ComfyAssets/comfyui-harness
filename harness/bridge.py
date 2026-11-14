@@ -356,6 +356,11 @@ class Bridge:
     def switched_off(self) -> None:
         self._end()
 
+    @property
+    def live(self) -> bool:
+        """True while the running session holds a secret."""
+        return self._secret is not None
+
     def secret_matches(self, candidate: str) -> bool:
         secret = self._secret
         if secret is None or not isinstance(candidate, str):

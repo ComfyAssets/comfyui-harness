@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DISCLOSURE, createPairingDialog } from "../../web/dialogs.js";
+import { BRIDGE_DISCLOSURE, DISCLOSURE, createBridgeDialog, createPairingDialog } from "../../web/dialogs.js";
 import { HarnessError } from "../../web/client.js";
 
 class El {
@@ -363,4 +363,46 @@ test("request a new code is the primary action", async () => {
   await s.tick();
   await s.poll();
   assert.match(s.byText("Request a new code", "BUTTON").style.background, /^var\(--primary-background, /);
+});
+
+const BRIDGE_STATEMENTS = [
+  "The agent in the terminal can read the workflow open in this page: every node, every setting and every prompt text in it.",
+  "It can change that workflow. Each change is one undo step.",
+  "It can learn the file paths of your outputs and open those images.",
+  "Text inside a workflow (notes, titles, prompts) is read by the agent and can steer it.",
+];
+
+test("bridge disclosure strings are verbatim", () => {
+  assert.deepEqual([...BRIDGE_DISCLOSURE], BRIDGE_STATEMENTS);
+});
+
+test("the bridge dialog lists the statements, starts hidden and has Cancel and Turn on", () => {
+  const dialog = createBridgeDialog({ document: fakeDocument, onAccept: () => {} });
+  const root = dialog.element;
+  assert.equal(root.style.display, "none");
+  assert.equal(root.find((e) => e.tagName === "LI").length, 4);
+  assert.deepEqual(root.find((e) => e.tagName === "LI").map((e) => e.textContent), BRIDGE_STATEMENTS);
+  const labels = root.find((e) => e.tagName === "BUTTON").map((e) => e.textContent);
+  assert.deepEqual(labels, ["×", "Cancel", "Turn on"]);
+  for (const b of root.find((e) => e.tagName === "BUTTON")) assert.ok(b.style.background, b.textContent);
+  dialog.open();
+  assert.equal(root.style.display, "flex");
+  dialog.close();
+  assert.equal(root.style.display, "none");
+});
+
+test("Turn on accepts and closes; Cancel and × only close", () => {
+  let accepted = 0;
+  const dialog = createBridgeDialog({ document: fakeDocument, onAccept: () => accepted++ });
+  const button = (text) => dialog.element.find((e) => e.tagName === "BUTTON" && e.textContent === text)[0];
+  for (const text of ["Cancel", "×"]) {
+    dialog.open();
+    button(text).dispatch("click");
+    assert.equal(dialog.element.style.display, "none");
+  }
+  assert.equal(accepted, 0);
+  dialog.open();
+  button("Turn on").dispatch("click");
+  assert.equal(accepted, 1);
+  assert.equal(dialog.element.style.display, "none");
 });

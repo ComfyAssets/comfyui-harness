@@ -543,6 +543,17 @@ export function createHarness({
     }
   }
 
+  // The existing stop followed by start-and-continue, so the conversation is kept.
+  async function restartSession() {
+    if (!socket || socketState !== "open") {
+      throw new Error("Open the terminal first, then try again.");
+    }
+    send({ type: "stop" });
+    sendStart(true);
+    session = { state: "running" };
+    render();
+  }
+
   function serverRows() {
     const holder = document.createElement("div");
     const refresh = async () => {
@@ -556,7 +567,7 @@ export function createHarness({
       }
       try {
         holder.replaceChildren(renderServerRows({
-          document, io, status: current, browsers, onPair: () => dialog.open(), onChange: refresh,
+          document, io, status: current, browsers, onPair: () => dialog.open(), onChange: refresh, onRestart: restartSession,
         }));
       } catch (error) {
         const message = document.createElement("p");

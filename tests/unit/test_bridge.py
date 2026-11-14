@@ -494,6 +494,16 @@ def test_switching_off_clears_the_secret_and_switching_on_does_not_bring_it_back
     assert not rig.bridge.secret_matches(rig.secret)
 
 
+def test_live_is_true_only_while_a_session_holds_a_secret() -> None:
+    rig = Rig()
+    assert rig.bridge.live is True
+    rig.bridge.close_session()
+    assert rig.bridge.live is False
+    rig.set(bridge_enabled=False)
+    assert rig.bridge.open_session() is None
+    assert rig.bridge.live is False
+
+
 def test_secret_matches_is_false_for_empty_wrong_and_old_secrets() -> None:
     rig = Rig()
     assert rig.secret is not None

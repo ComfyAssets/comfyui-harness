@@ -3,7 +3,8 @@
 // Server state (the enabled switch, paired browsers, what was found) is drawn from the
 // server every time and is never stored here.
 import { DEFAULTS, format, parse } from "./keys.js";
-import { revokeBrowser, setEnabled } from "./client.js";
+import { revokeBrowser, setBridge, setBridgeEdits, setBridgeRuns, setEnabled } from "./client.js";
+import { createBridgeDialog } from "./dialogs.js";
 import { TOKENS, css, styleButton } from "./style.js";
 
 export const IDS = {
@@ -20,6 +21,11 @@ const RANGES = {
   [IDS.height]: { min: 10, max: 100, fallback: 50 },
   [IDS.opacity]: { min: 20, max: 100, fallback: 90 },
   [IDS.fontSize]: { min: 8, max: 32, fallback: 14 },
+};
+const BRIDGE_REASONS = {
+  tls: "The canvas bridge is not available when ComfyUI serves HTTPS itself.",
+  unsupported: "Not supported on this platform",
+  not_loopback: "The canvas bridge needs ComfyUI to listen on this machine's own address (127.0.0.1 or all interfaces).",
 };
 const MCP_HINT = "pip install comfy-mcp";
 
@@ -99,7 +105,7 @@ function lastSeen(seconds) {
   return Number.isNaN(date.getTime()) ? "unknown" : date.toLocaleString();
 }
 
-export function renderServerRows({ document, io, status, browsers = [], onPair = () => {}, onChange = () => {} }) {
+export function renderServerRows({ document, io, status, browsers = [], onPair = () => {}, onChange = () => {}, onRestart = async () => {} }) {
   const make = (tag, text) => {
     const el = document.createElement(tag);
     if (text !== undefined) el.textContent = text;
@@ -195,6 +201,56 @@ export function renderServerRows({ document, io, status, browsers = [], onPair =
     row.append(info, revoke);
     list.append(row);
   }
-  root.append(list, message);
+  root.append(list);
+  root.append(...canvasRows());
+  root.append(message);
   return root;
+
+  function canvasRows() {
+    const heading = styled("h4", "Canvas", { margin: "6px 0 0", fontSize: "13px", fontWeight: "600" });
+    if (!status.bridge_available) {
+      return [heading, line(BRIDGE_REASONS[status.bridge_reason] ?? BRIDGE_REASONS.unsupported)];
+    }
+    const dialog = createBridgeDialog({ document, onAccept: () => act(() => setBridge(io, true)) });
+    const row = (name, checked, onToggle, note) => {
+      const wrap = styled("div", undefined, { display: "flex", flexDirection: "column", gap: "2px" });
+      const label = styled("label", undefined, { display: "flex", alignItems: "center", gap: "10px", cursor: "pointer", fontWeight: "600" });
+      const input = make("input");
+      input.setAttribute("type", "checkbox");
+      input.setAttribute("role", "switch");
+      css(input, { width: "16px", height: "16px", margin: "0", accentColor: TOKENS.accent, cursor: "pointer" });
+      input.checked = Boolean(checked);
+      input.addEventListener("change", () => onToggle(input));
+      label.append(input, make("span", name));
+      wrap.append(label);
+      if (note) wrap.append(styled("p", note, { ...MUTED, margin: "0 0 0 26px" }));
+      return wrap;
+    };
+    const bridgeRow = row("Canvas bridge", status.bridge_enabled, (input) => {
+      if (input.checked) {
+        // Nothing changes on the server until the disclosure is accepted.
+        input.checked = false;
+        dialog.open();
+      } else {
+        act(() => setBridge(io, false));
+      }
+    });
+    const rows = [heading, bridgeRow];
+    if (status.bridge_enabled && status.session && !status.bridge_live) {
+      const again = styleButton(make("button", "Start again"), "secondary");
+      again.addEventListener("click", () => act(onRestart));
+      const notice = styled("div", undefined, { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap", marginLeft: "26px" });
+      notice.append(styled("span", "Takes effect when the session starts again.", MUTED), again);
+      rows.push(notice);
+    }
+    rows.push(
+      row("Allow edits", status.bridge_edits, (input) => act(() => setBridgeEdits(io, Boolean(input.checked))),
+        "When off, the agent can read the canvas but not change it."),
+      row("Allow runs", status.bridge_runs, (input) => act(() => setBridgeRuns(io, Boolean(input.checked))),
+        "Lets the agent press Run when you ask it to. A run uses your GPU and writes output files, and cannot be undone."),
+      styled("p", "These are settings the harness honours. They do not restrain the agent itself, which runs as your account.", MUTED),
+      dialog.element,
+    );
+    return rows;
+  }
 }

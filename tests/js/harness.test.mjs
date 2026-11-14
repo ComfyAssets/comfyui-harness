@@ -388,6 +388,30 @@ test("server rows show a rendering failure as text instead of rejecting", async 
   assert.match(holder.textContent, /not iterable|Could not/);
 });
 
+test("Start again in the Canvas rows sends stop then start with resume true", async () => {
+  const status = { ...READY, bridge_enabled: true, bridge_edits: true, bridge_runs: false, bridge_available: true, bridge_reason: "", bridge_live: false, session: { cli: "claude" } };
+  const env = await openReady({ status });
+  env.socket().receive({ type: "hello", boot: "b1", session: { cli: "claude" } });
+  const holder = env.added.find((s) => s.id === "Harness.Server").type();
+  await flush();
+  byText(holder, "Start again", "BUTTON").click();
+  await flush();
+  assert.deepEqual(env.socket().json().slice(-2), [
+    { type: "stop" },
+    { type: "start", cli: "claude", cols: 80, rows: 24, resume: true },
+  ]);
+});
+
+test("Start again without an open terminal says so and sends nothing", async () => {
+  const status = { ...READY, bridge_enabled: true, bridge_edits: true, bridge_runs: false, bridge_available: true, bridge_reason: "", bridge_live: false, session: { cli: "claude" } };
+  const env = setup({ status });
+  const holder = env.added.find((s) => s.id === "Harness.Server").type();
+  await flush();
+  byText(holder, "Start again", "BUTTON").click();
+  await flush();
+  assert.match(holder.textContent, /Open the terminal first/);
+});
+
 test("the terminal is not exposed on window without the test flag", async () => {
   for (const testFlag of [undefined, false, "true", 1]) {
     const env = await openReady({ testFlag });

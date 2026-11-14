@@ -182,6 +182,7 @@ def _bridge_status(deps: Deps, store: Store) -> dict:
         "bridge_runs": state.bridge_runs,
         "bridge_available": reason == "",
         "bridge_reason": reason,
+        "bridge_live": deps.bridge is not None and deps.bridge.live,
     }
 
 

@@ -10,6 +10,13 @@ export const DISCLOSURE = [
   "Enter only a code shown on your own screen.",
 ];
 
+export const BRIDGE_DISCLOSURE = [
+  "The agent in the terminal can read the workflow open in this page: every node, every setting and every prompt text in it.",
+  "It can change that workflow. Each change is one undo step.",
+  "It can learn the file paths of your outputs and open those images.",
+  "Text inside a workflow (notes, titles, prompts) is read by the agent and can steer it.",
+];
+
 const POLL_MS = 2000;
 const COUNTDOWN_MS = 1000;
 const REJECTED_TEXT = "That code was not accepted. Request a new one.";
@@ -242,5 +249,58 @@ export function createPairingDialog({
       element.style.display = "flex";
     },
     close: closeDialog,
+  };
+}
+
+// The canvas bridge consent. Nothing is enabled until Turn on is pressed.
+export function createBridgeDialog({ document, onAccept = () => {} }) {
+  const make = (tag, text) => {
+    const el = document.createElement(tag);
+    if (text !== undefined) el.textContent = text;
+    return el;
+  };
+  const styled = (tag, text, styles) => css(make(tag, text), styles);
+  const button = (text, variant) => styleButton(make("button", text), variant);
+
+  const element = styled("div", undefined, BACKDROP);
+  element.setAttribute("role", "dialog");
+  element.setAttribute("aria-modal", "true");
+  element.setAttribute("aria-label", "Turn on the canvas bridge");
+  const card = styled("div", undefined, CARD);
+  element.append(card);
+
+  const header = styled("div", undefined, { display: "flex", alignItems: "center", gap: "12px" });
+  const heading = styled("h2", "Turn on the canvas bridge", { margin: "0", flex: "1 1 auto", fontSize: "18px", fontWeight: "600" });
+  const closeX = button("×", "icon");
+  closeX.setAttribute("aria-label", "Close canvas bridge dialog");
+  header.append(heading, closeX);
+
+  const notice = styled("div", undefined, { ...BOX, padding: "10px 14px" });
+  const list = styled("ul", undefined, { margin: "0", paddingLeft: "18px", display: "grid", gap: "6px", fontSize: "13px" });
+  for (const line of BRIDGE_DISCLOSURE) list.appendChild(make("li", line));
+  notice.append(list);
+
+  const footer = styled("div", undefined, { display: "flex", justifyContent: "flex-end", gap: "8px" });
+  const cancel = button("Cancel", "secondary");
+  const accept = button("Turn on", "primary");
+  footer.append(cancel, accept);
+  card.append(header, notice, footer);
+
+  const close = () => {
+    element.style.display = "none";
+  };
+  cancel.addEventListener("click", close);
+  closeX.addEventListener("click", close);
+  accept.addEventListener("click", () => {
+    close();
+    onAccept();
+  });
+
+  return {
+    element,
+    open() {
+      element.style.display = "flex";
+    },
+    close,
   };
 }

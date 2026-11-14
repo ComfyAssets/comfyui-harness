@@ -56,6 +56,9 @@ export const requestPairing = (io) => call(io, "POST", "/pair/request", { body: 
 export const listBrowsers = (io) => call(io, "GET", "/pair/browsers");
 export const revokeBrowser = (io, id) => call(io, "DELETE", `/pair/browsers/${encodeURIComponent(id)}`);
 export const setEnabled = (io, enabled) => call(io, "PUT", "/enabled", { body: { enabled } });
+export const setBridge = (io, enabled) => call(io, "PUT", "/bridge", { body: { enabled } });
+export const setBridgeEdits = (io, enabled) => call(io, "PUT", "/bridge/edits", { body: { enabled } });
+export const setBridgeRuns = (io, enabled) => call(io, "PUT", "/bridge/runs", { body: { enabled } });
 
 export async function pollPairing(io, pollSecret) {
   const result = await call(io, "POST", "/pair/poll", { headers: { [POLL_HEADER]: pollSecret }, body: {} });

@@ -42,6 +42,7 @@ async def test_status_for_paired_caller_adds_cli_and_session(client, deps):
         "bridge_runs": False,
         "bridge_available": False,
         "bridge_reason": "unsupported",  # no Bridge was built for these deps
+        "bridge_live": False,
     }
 
 
@@ -718,6 +719,17 @@ async def test_status_reports_the_bridge_only_to_a_paired_browser(client, deps, 
     assert body["bridge_runs"] is False
     assert body["bridge_available"] is True
     assert body["bridge_reason"] == ""
+    assert body["bridge_live"] is False
+
+
+async def test_status_reports_whether_the_running_session_has_a_bridge_secret(client, deps, bridge):
+    headers, _ = await pair(client, deps)
+    bridge.open_session()
+    body = await (await client.get("/harness/status", headers=same_origin(headers))).json()
+    assert body["bridge_live"] is True
+    bridge.close_session()
+    body = await (await client.get("/harness/status", headers=same_origin(headers))).json()
+    assert body["bridge_live"] is False
 
 
 @pytest.mark.parametrize(
