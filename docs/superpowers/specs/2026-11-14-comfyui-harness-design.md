@@ -153,7 +153,7 @@ Every browser pairs, wherever it is. There is no same-machine shortcut.
 | Waiting request lifetime | 5 minutes. |
 | Waiting requests at once | 20. A new one when full removes the oldest. |
 | Pair file | Accepted if it is a regular file, not a symlink, owned by the server's account or root. Its mode is not checked. Empty content is ignored. A file that matches nothing is left alone and removed once it is 5 minutes old. An invalid HMAC is reported to the polling page as "rejected". |
-| Cookie | `__Host-harness-<instance id>`, 32 random bytes, `Secure`, `HttpOnly`, `SameSite=Strict`, `Path=/`. Valid 30 days from last use and never more than 90 days from pairing. |
+| Cookie | `__Host-harness-<instance id>`, 32 random bytes, `Secure`, `HttpOnly`, `SameSite=Strict`, `Path=/`. Valid 30 days from last use and never more than 90 days from pairing: the browser keeps it for 90 days (`Max-Age`), and the server refuses it after 30 idle days. |
 | Stored record | SHA-256 of the cookie, paired origin, user-agent label, created, last seen (written at most hourly), disclosure acknowledged at. |
 | Transport | Refused unless the request `Origin` is `https://…` or a loopback address. The refusal names ComfyUI's `--tls-keyfile` and a TLS proxy as remedies. |
 | Revocation | Removes the record and closes that browser's socket. If no paired browser remains, the session ends. |
@@ -372,16 +372,16 @@ A table with one row in release 1. The browser never sends a program name.
 A test asserts no argument list contains a flag that weakens permission
 prompts.
 
-`mcp.json`, written at session start when `comfy-mcp` is found on `PATH`:
+`mcp.json`, written at session start when `comfy-mcp` is found (next to the server's Python first, then absolute `PATH` entries, then `~/.local/bin`):
 
 ```json
 { "mcpServers": { "comfy-mcp": {
     "command": "<absolute path to comfy-mcp>",
-    "env": { "COMFYUI_URL": "http://127.0.0.1:<port>",
+    "env": { "COMFYUI_URL": "<scheme>://<host>:<port>",
              "COMFY_BIN": "<comfy next to the server's python, else on PATH>" } } } }
 ```
 
-The port is ComfyUI's own. `comfy-mcp` is the official MCP server from
+The URL is ComfyUI's own: `https` when started with `--tls-keyfile`, else `http`; the host is the address ComfyUI listens on (the first of a comma-separated list), with `127.0.0.1` for `0.0.0.0` and `[::1]` for `::`; the port is ComfyUI's port. `comfy-mcp` is the official MCP server from
 Comfy-Org, a separate pip package the user installs; we never install it. If
 it is missing, the CLI starts without it and settings shows the install
 command. This file adds to the user's own MCP servers; it does not replace
