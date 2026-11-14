@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Harness fixture</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #202020; color: #ddd; font-family: sans-serif; }
+    #graph-canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; background: #2a2a2a; }
+    #prompt { position: fixed; right: 16px; bottom: 16px; width: 240px; height: 60px; }
+    #settings { position: fixed; left: 16px; bottom: 16px; max-width: 60vw; background: #303030; }
+  </style>
+  <script>
+    // Lets the harness expose its terminal so tests can read the screen.
+    window.__HARNESS_TEST__ = true;
+    // Stands in for ComfyUI's paste handler on the canvas.
+    document.addEventListener("paste", () => { window.__canvasPasted = true; });
+  </script>
+</head>
+<body>
+  <canvas id="graph-canvas" tabindex="1"></canvas>
+  <textarea id="prompt" aria-label="prompt"></textarea>
+  <div id="settings"></div>
+  <script type="module">
+    import "/scripts/app.js";
+    import "/extensions/comfyui-harness/harness.js";
+  </script>
+</body>
+</html>

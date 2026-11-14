@@ -99,6 +99,8 @@ export function createHarness({
       term.onData((data) => socket?.sendBytes(encoder.encode(data)));
       term.onResize(({ cols, rows }) => send({ type: "resize", cols, rows }));
       terminal = { term, fit };
+      // Browser tests read the screen through this; ComfyUI never sets the flag.
+      if (win?.__HARNESS_TEST__ === true) win.__harnessTerm = term;
       return terminal;
     })();
     try {

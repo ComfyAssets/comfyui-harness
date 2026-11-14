@@ -51,13 +51,14 @@ function fakeTerminalModule() {
   return mod;
 }
 
-function setup({ status = READY, values = {}, reduced = false, browsers = [] } = {}) {
+function setup({ status = READY, values = {}, reduced = false, browsers = [], testFlag } = {}) {
   const timers = [];
   FakeSocket.all = [];
   const state = { status };
   const document = fakeDocument();
   const listeners = [];
   const window = { addEventListener: (type, fn, options) => listeners.push({ type, fn, options }) };
+  if (testFlag !== undefined) window.__HARNESS_TEST__ = testFlag;
   const added = [];
   const app = { ui: { settings: { addSetting: (s) => added.push(s), getSettingValue: (id) => values[id] } } };
   const io = fakeIo({
@@ -83,7 +84,7 @@ function setup({ status = READY, values = {}, reduced = false, browsers = [] } =
   };
   const socket = () => FakeSocket.all.at(-1);
   const runTimers = () => { for (const fn of timers.splice(0)) fn(); };
-  return { runTimers, state, document, listeners, added, io, mod, loads: () => loads, harness, press, socket, panel: harness.panel, values };
+  return { window, runTimers, state, document, listeners, added, io, mod, loads: () => loads, harness, press, socket, panel: harness.panel, values };
 }
 
 async function openReady(options) {
@@ -380,6 +381,19 @@ test("server rows show a rendering failure as text instead of rejecting", async 
   const holder = env.added.find((s) => s.id === "Harness.Server").type();
   await flush();
   assert.match(holder.textContent, /not iterable|Could not/);
+});
+
+test("the terminal is not exposed on window without the test flag", async () => {
+  for (const testFlag of [undefined, false, "true", 1]) {
+    const env = await openReady({ testFlag });
+    assert.equal(env.mod.terms.length, 1);
+    assert.equal("__harnessTerm" in env.window, false);
+  }
+});
+
+test("the terminal is exposed on window only when the test flag is exactly true", async () => {
+  const env = await openReady({ testFlag: true });
+  assert.equal(env.window.__harnessTerm, env.mod.terms[0]);
 });
 
 // Found in Chromium: after switching off and on again, the page said the session
