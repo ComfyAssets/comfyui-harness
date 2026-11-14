@@ -1,4 +1,4 @@
-exclude: ^(web/vendor/|spike/)
+exclude: ^web/vendor/
 repos:
   - repo: local
     hooks:

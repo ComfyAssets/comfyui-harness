@@ -13,7 +13,7 @@ DisplayName = "ComfyUI Harness"
 
 [tool.black]
 line-length = 100
-extend-exclude = '/(spike|web/vendor)/'
+extend-exclude = '/web/vendor/'
 
 [tool.coverage.run]
 source = ["harness"]
