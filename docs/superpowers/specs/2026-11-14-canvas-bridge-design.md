@@ -371,8 +371,11 @@ All in the page, in `web/bridge.js`:
    on either side, or any member of a comma-joined list). The first failure
    refuses the whole batch and names the op by its position, with what would
    be valid (for example the widget names the node has, or the slot types).
-3. **Apply inside one change group.** Call the active workflow's change
-   tracker `beforeChange()`, apply every op in order, call `afterChange()`.
+3. **Apply inside one change group.** If the author is in the middle of a
+   change (the tracker's nesting depth is not zero), refuse with "busy".
+   Otherwise first record any author change not yet recorded (the tracker's
+   `captureCanvasState()`), so it stays its own undo step. Then call the
+   active workflow's change tracker `beforeChange()`, apply every op in order, call `afterChange()`.
    That is one undo state for the whole batch. Verified in frontend 1.59.1:
    `beforeChange` increments a counter and `afterChange` records one state
    when it returns to zero.
@@ -380,7 +383,10 @@ All in the page, in `web/bridge.js`:
    canvas back as it was, then report `applied: false` with the op and the
    error. Putting it back must never undo a step of the author's: the page
    undoes once only if this batch recorded a new undo state (a batch that
-   threw before changing anything records none). If it cannot tell, it
+   threw before changing anything records none). "Recorded" is decided by
+   comparing the newest undo entry before and after, not the history's
+   length, which stops growing at 50. Undo is asynchronous and reloads the
+   graph, so the page waits for it and finds nodes again by id. If it cannot tell, it
    restores the graph from a copy taken before step 3 instead.
 5. **Tell the author.** The panel's existing notice line shows the agent's
    `summary` and the counts ("Claude: add 4x upscaler after the final image.
@@ -584,7 +590,39 @@ Claude Code settings.
 - How `terminal.py` and `bridge.py` share the waiting-reply table without
   breaking the rule that mutes happen before any `await`.
 
-## 13. Decisions
+## 13. Changes after the frontend spike
+
+Task 1 of the plan checked every call above in frontend 1.59.1
+(`docs/superpowers/plans/2026-11-14-canvas-bridge-frontend-notes.md`).
+Nothing the design needs is missing. These details changed; the author
+approved continuing with them.
+
+- `run` queues through the same call as the Run button. That call does not
+  return the prompt id, so the page captures the id and queue number from
+  ComfyUI's API layer for that one call.
+- Cancel is one call that removes a queued prompt or stops a running one.
+- Applying an edit: refuse while the author is mid-change; record any
+  unrecorded author change first; detect a recorded undo step by the newest
+  entry, not the count; wait for undo and look nodes up again (6.6).
+- The notice's Undo works only while the agent's step is still the newest
+  undo entry, nothing has been redone, and the same workflow tab is active.
+- The graph shown is the canvas's graph (root, or the opened subgraph).
+  Node ids are strings. A workflow's stable identity for the fingerprint is
+  its tab's instance id, which unsaved workflows also have.
+- Errors and outputs are kept per workflow tab. `get_errors` and
+  `get_outputs` describe the tab on screen, since the page loaded.
+- The last execution error carries the whole prompt and workflow; the page
+  passes on only the fields in 6.5, never that object.
+- Combo widgets accept any value, so the page's validation is the only
+  check that a combo value is one of its options.
+- Run state, errors, outputs and node definitions are partly reachable only
+  through the frontend's internal stores. That works on the pinned 1.59.1
+  and may move on an upgrade. Every such use stays in one adapter in
+  `web/harness.js`, and the real-ComfyUI test catches a move.
+- The real-ComfyUI tests must load only the branch's copy of the node; the
+  test copy gets its own folder name (plan Task 13).
+
+## 14. Decisions
 
 | Decision | By |
 |---|---|

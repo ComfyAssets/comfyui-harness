@@ -23,6 +23,7 @@
 - Never start or type into the real `claude` CLI. Never touch the ComfyUI on port 8188.
 - Commit messages are `<type>: <description>`. No AI attribution of any kind: no `Co-Authored-By`, no `Claude-Session` trailer, no "Generated with" line, no session links.
 - Exact values from the spec: tool timeout 20 s; call queue limit 8; request body limit 1 MiB; page reply limit 256 KiB; other text frames stay at 4096 bytes; `get_outline` `max_chars` default 20000, max 60000; `get_nodes` 1 to 50 ids; `get_node_types` 1 to 20 types or a search returning up to 30; `edit` 1 to 200 ops; widget values cut at 120 characters in the outline; combo options up to 50; traceback last 20 lines; secret is 32 random bytes as hex; refusal code `bridge_refused` with HTTP 403.
+- Frontend facts from the spike (`docs/superpowers/plans/2026-11-14-canvas-bridge-frontend-notes.md`) bind the page tasks: node ids are strings (`"12"`); the graph shown is `app.canvas.graph`, never `app.graph`; undo is async and replaces node objects; a workflow tab's stable id is `activeWorkflow.instanceId`; never forward `lastExecutionError.current_inputs`; prefer public `app` getters over `app.extensionManager._p._s` stores and keep every use of the internal stores inside the `host` adapter in `web/harness.js`.
 - `security-reviewer` runs on every task that touches `store`, `guard`, `routes`, `terminal`, `session`, `cli`, `mcp` or `bridge`.
 
 ## Review Focus
@@ -528,12 +529,12 @@ export class BridgeError extends Error { constructor(code, message) }   // code:
 export function typesMatch(outputType, inputType)        // exact, "*" on either side, or any member of a comma-joined list
 export function validateOps(graph, types, ops)           // throws BridgeError("invalid", …) naming the op's position (1-based)
 export function placeNear(graph, anchor, size)           // [x, y]; right of anchor, stepping down until free
-export function applyOps(host, ops)                      // { ids, widgets: [{ op, node, widget, asked, now }], counts: { added, removed, changed } }
+export async function applyOps(host, ops)                // resolves { ids, widgets: [{ op, node, widget, asked, now }], counts: { added, removed, changed } }
 ```
 
 - `validateOps` checks the whole batch before anything changes, tracking refs made by earlier `add_node` ops and nodes removed by earlier `remove_node` ops. Messages name the op and what would be valid, for example `Op 3 (set_widget): node #12 has no widget "stepz". Its widgets are: seed, steps, cfg, sampler_name, scheduler, denoise.`
 - Value rules: a number widget takes a finite number within its min and max; a combo takes one of its options; a text widget takes a string; a toggle takes a boolean.
-- `applyOps` wraps every op in one `host.tracker().beforeChange()` / `afterChange()` pair. After each `set_widget` it reads the widget back and records `now`. If an op throws: finish the change group, then undo once **only if** the tracker's undo count grew during this batch; otherwise leave the undo stack alone; then throw `BridgeError("failed", …)` naming the op.
+- `applyOps` first refuses with `BridgeError("busy", "The author is in the middle of a change. Try again in a moment.")` when `tracker.depth() !== 0`; then calls `tracker.capture()` (so an author change not yet recorded stays its own undo step); takes `before = tracker.mark()`; wraps every op in one `tracker.beforeChange()` / `afterChange()` pair (the `afterChange` in `finally`). After each `set_widget` it reads the widget back and records `now`. If an op throws: after the `finally`, `await tracker.undo()` **only if** `tracker.mark() !== before` (a new state was recorded); otherwise leave the undo stack alone; then throw `BridgeError("failed", …)` naming the op. Never hold node objects across the undo: it reloads the graph. (Notes: "host.tracker()".)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -550,6 +551,7 @@ test("frontend-only types Note, MarkdownNote, Reroute and PrimitiveNode can be a
 test("a widget the node rewrites is reported with what it holds now", ...)  // fake callback halves the value
 test("a throw after two applied ops undoes exactly one step and reports the op", ...)
 test("a throw before any change does not touch the undo stack", ...)        // the author's last step survives
+test("an author change not yet captured stays its own undo step", ...)      // capture() runs before beforeChange()
 test("a new node without pos goes right of its anchor and steps down past an occupied spot", ...)
 test("with no anchor it goes to the view centre", ...)
 test("ids as numbers, numeric strings and qualified strings all address the right node", ...)
@@ -587,13 +589,15 @@ host = {
   types(),                 // registered node types
   createNode(type), removeNode(node), connect(from, outSlot, to, inSlot), disconnect(node, inSlot),
   setWidget(node, widget, value),          // value, then the widget's callback
-  tracker(),               // { beforeChange(), afterChange(), undo(), count() }
+  tracker(),               // { capture(), depth(), beforeChange(), afterChange(), undo() -> Promise, mark() -> token, isLatest(token) }
+                           // mark(): identity token for the newest undo state (undoQueue.at(-1) plus the tracker itself);
+                           // isLatest(token): token is still the newest state, redo is empty, and the same workflow tab is active
   selection(),             // nodes
   errors(),                // { nodes: [{ id, reasons }], execution: { node, type, message, traceback } | null, missing_types: [] }   traceback: last 20 lines
   outputs(),               // [{ node, files: [{ filename, subfolder, type }] }]
-  run(),                   // Promise<{ prompt_id, number } | { errors }>
+  run(),                   // Promise<{ prompt_id, number } | { errors }>: app.queuePrompt with app.api.queuePrompt wrapped for that one call (notes "host.run()")
   runState(),              // { state: "idle" | "queued" | "running", node? }
-  cancel(promptId),        // Promise<void>: delete if queued, interrupt if running
+  cancel(promptId),        // Promise<void>: app.api.cancelJob(id), which removes a queued prompt or interrupts a running one
   viewCenter(),            // [x, y]
 }
 ```
@@ -607,7 +611,7 @@ host = {
   - `run`: the same stale check; then `host.run()`; result `{ queued: true, prompt_id, number }` or `{ queued: false, errors }`; then `notify`;
   - a result whose JSON is over `LIMITS.replyBytes` is replaced by `BridgeError("too_large", "That is too much to send at once. Ask for fewer nodes or a smaller outline.")`;
   - an unknown command rejects with `BridgeError("invalid", "Unknown command.")`.
-- Notices: after an edit, `Claude: <summary>. Added N, removed N, changed N` with **Undo**; the button calls `host.tracker().undo()` only while the tracker's count is what it was right after the edit, and the notice is cleared as soon as the fingerprint or the count moves. After a run, `Claude queued a run` with **Cancel** calling `host.cancel(prompt_id)`. `summary` is shown with `textContent` and cut at 200 characters.
+- Notices: after an edit, `Claude: <summary>. Added N, removed N, changed N` with **Undo**; the button awaits `host.tracker().undo()` only while `tracker.isLatest(markAfterEdit)` holds, and the notice is cleared as soon as the fingerprint changes or `isLatest` turns false. After a run, `Claude queued a run` with **Cancel** calling `host.cancel(prompt_id)`. `summary` is shown with `textContent` and cut at 200 characters.
 - `web/harness.js`: on a `bridge` frame, call `handle` and send `{ type: "bridge_reply", rid, ok: true, result }` or `{ ok: false, error: { code, message } }`. An error that is not a `BridgeError` becomes `{ code: "failed", message: "The page could not do that." }`. A `bridge` frame without a string `rid` is ignored.
 
 - [ ] **Step 1: Write the failing tests**
@@ -621,7 +625,9 @@ test("an edit with an old fingerprint is refused as stale and changes nothing", 
 test("an edit returns the new fingerprint, which differs from the old one", ...)
 test("an edit shows a notice with the summary and counts", ...)
 test("Undo undoes the edit once, then the notice is gone", ...)
-test("after the author changes anything the Undo button no longer undoes", ...)   // count moved: undo() not called
+test("after the author changes anything the Undo button no longer undoes", ...)   // isLatest false: undo() not called
+test("a full 50-entry undo history still detects a new step by identity", ...)
+test("an edit is refused as busy while the author is mid-change", ...)
 test("run with an old fingerprint is refused; a fresh one queues once", ...)
 test("a refused prompt returns its errors and queued false", ...)
 test("Cancel calls host.cancel with the prompt id", ...)
@@ -734,6 +740,8 @@ test("turning the bridge off makes the next call a 403", ...)
 **Files:**
 - Create: `tests/comfyui/bridge.spec.mjs`
 - Modify: `tests/comfyui/exposure.sh`, `tools/testing/comfyui.config.mjs` (only if the bridge needs to be enabled in the scratch state), `docs/superpowers/specs/2026-11-14-comfyui-harness-design.md`, `SECURITY.md`, `README.md`, `docs/manual-checks.md`, `CLAUDE.md`
+
+- [ ] **Step 0: Make the throwaway ComfyUI load only this branch.** The author's ComfyUI has `custom_nodes/comfyui-harness` (a link to the main checkout), and `--whitelist-custom-nodes comfyui-harness` loads it as well as the scratch link, so two copies register routes. In `tools/testing/comfyui.config.mjs` and `tests/comfyui/exposure.sh`, name the scratch link `comfyui-harness-under-test` and whitelist that name only. Update anything that assumes the folder name (the `/extensions/<name>/` URL, the pair command path in assertions). Verify by asserting in the smoke spec that the served `harness.js` is the worktree's file (for example, fetch `/extensions/comfyui-harness-under-test/harness.js` and compare with the file on disk), and that `/extensions/comfyui-harness/harness.js` is not loaded by the page.
 
 - [ ] **Step 1: Write `tests/comfyui/bridge.spec.mjs`** using the `mcp()` helper against the real page (frontend 1.59.1, fake CLI, CPU):
   - pair, turn the bridge on through Settings, start the session;
