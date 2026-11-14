@@ -1,8 +1,9 @@
-"""HTTP routes: status, pairing and the enabled switch.
+"""HTTP routes: status, pairing, the enabled switch and the terminal WebSocket.
 
 Nothing secret is logged here: not cookies, poll secrets, header values or bodies.
 """
 
+import asyncio
 import json
 import logging
 import shlex
@@ -14,6 +15,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from aiohttp import web
 
+from . import cli
 from .guard import (
     Refusal,
     classify,
@@ -22,7 +24,9 @@ from .guard import (
     require_paired,
 )
 from .pairing import COOKIE_IDLE, Pairing
+from .session import SessionManager
 from .store import Browser, Store, StoreError
+from .terminal import Terminal
 
 log = logging.getLogger("harness")
 
@@ -42,12 +46,13 @@ class Deps:
     store: Optional[Store]
     store_error: Optional[StoreError]
     pairing: Optional[Pairing]
-    sessions: Any  # SessionManager, set in a later task
+    sessions: Optional[SessionManager]
     supported: bool
     node_dir: Path
     comfy_port: Callable[[], int]
     cli_status: Callable[[], dict]
     clock: Callable[[], float] = time.time
+    terminal: Optional[Terminal] = None
 
 
 class _RefusalLog:
@@ -126,8 +131,16 @@ async def _enabled_flag(request: web.Request) -> bool:
     return body["enabled"]
 
 
+def _terminal(deps: Deps) -> Terminal:
+    """One Terminal per Deps, shared by every prefix the routes are set up under."""
+    if deps.terminal is None:
+        deps.terminal = Terminal(deps)
+    return deps.terminal
+
+
 def setup(routes: web.RouteTableDef, deps: Deps, prefix: str = "/harness") -> None:
     refusals = _RefusalLog(deps.clock)
+    terminal = _terminal(deps)
 
     def route(method: str, path: str) -> Callable[[Handler], Handler]:
         def register(fn: Handler) -> Handler:
@@ -158,7 +171,7 @@ def setup(routes: web.RouteTableDef, deps: Deps, prefix: str = "/harness") -> No
         }
         if browser is not None:
             body.update(deps.cli_status())
-            body["session"] = None if deps.sessions is None else deps.sessions.status()
+            body["session"] = None if deps.sessions is None else deps.sessions.info()
         return web.json_response(body)
 
     @route("POST", "/pair/request")
@@ -208,6 +221,7 @@ def setup(routes: web.RouteTableDef, deps: Deps, prefix: str = "/harness") -> No
         paired(request)
         if pairing().revoke(request.match_info["id"]) is None:
             raise Refusal("not_found", "No such paired browser.")
+        await terminal.settle()
         return web.Response(status=204)
 
     @route("PUT", "/enabled")
@@ -216,11 +230,37 @@ def setup(routes: web.RouteTableDef, deps: Deps, prefix: str = "/harness") -> No
         value = await _enabled_flag(request)
         store().update(lambda state: replace(state, enabled=value))
         log.info("terminal %s", "enabled" if value else "disabled")
+        if not value:
+            await terminal.disable()
         return web.Response(status=204)
+
+    @route("GET", "/terminal/ws")
+    async def terminal_ws(request: web.Request) -> web.StreamResponse:
+        browser = paired(request)
+        if not store().state.enabled:
+            raise Refusal("disabled", "The terminal is turned off. Turn it on in the panel.")
+        if not deps.supported:
+            raise Refusal("unsupported_platform", "The terminal is only supported on Linux.")
+        if deps.sessions is None:
+            raise Refusal("bad_state", "The terminal session is not available.")
+        return await terminal.serve(request, browser.id)
 
 
 def _supported() -> bool:
     return sys.platform == "linux"
+
+
+def _session_manager(store: Store, cwd: Path, comfy_port: Callable[[], int]) -> SessionManager:
+    """Linux only: session_host imports fcntl, pty and termios."""
+    from .session_host import PtySessionHost, reap_stale
+
+    reap_stale(store.pid_path)
+    return SessionManager(
+        host_factory=lambda: PtySessionHost(asyncio.get_running_loop(), store.pid_path),
+        store=store,
+        cwd=cwd,
+        comfy_port=comfy_port,
+    )
 
 
 def install(prompt_server: Any) -> Deps:
@@ -238,15 +278,18 @@ def install(prompt_server: Any) -> Deps:
     except StoreError as error:
         store_error = error
         log.error("harness data directory unusable: %s", error.code)
+    supported = _supported()
     deps = Deps(
         store=store,
         store_error=store_error,
         pairing=pairing,
         sessions=None,
-        supported=_supported(),
+        supported=supported,
         node_dir=node_dir,
         comfy_port=lambda: prompt_server.port,
-        cli_status=lambda: {"cli_found": False, "mcp_found": False},  # Task 10 wires the real one
+        cli_status=cli.status,
     )
+    if supported and store is not None:
+        deps.sessions = _session_manager(store, Path(folder_paths.base_path), deps.comfy_port)
     setup(prompt_server.routes, deps)
     return deps

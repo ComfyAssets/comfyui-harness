@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
@@ -90,3 +91,44 @@ async def pair(client, deps, origin=ORIGIN, prefix="/harness"):
     assert (await poll.json()) == {"state": "paired"}
     cookie = poll.cookies[deps.pairing.cookie_name]
     return {"Cookie": f"{cookie.key}={cookie.value}", "Origin": origin}, body
+
+
+class FakeHost:
+    def __init__(self):
+        self.started = None
+        self.start_error = None
+        self.written = b""
+        self.size = None
+        self.nudged = 0
+        self.paused = 0
+        self.resumed = 0
+        self.killed = 0
+        self.running = False
+
+    def start(self, argv, cwd, env, cols, rows, on_output, on_exit):
+        if self.start_error:
+            raise self.start_error
+        self.started = SimpleNamespace(argv=argv, cwd=cwd, env=env)
+        self.size = (cols, rows)
+        self.on_output = on_output
+        self.on_exit = on_exit
+        self.running = True
+
+    def write(self, data):
+        self.written += data
+
+    def resize(self, cols, rows):
+        self.size = (cols, rows)
+
+    def nudge_redraw(self):
+        self.nudged += 1
+
+    def pause_output(self):
+        self.paused += 1
+
+    def resume_output(self):
+        self.resumed += 1
+
+    async def kill(self):
+        self.killed += 1
+        self.running = False

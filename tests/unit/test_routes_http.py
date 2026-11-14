@@ -331,6 +331,7 @@ def fake_folder_paths(monkeypatch, path):
 
     module = types.ModuleType("folder_paths")
     module.get_system_user_directory = lambda name: str(path)  # type: ignore[attr-defined]
+    module.base_path = str(path.parent)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "folder_paths", module)
 
 
@@ -344,7 +345,7 @@ async def test_install_registers_only_the_plain_prefix(monkeypatch, tmp_path):
     assert "/harness/status" in paths
     assert not any(p.startswith("/api") for p in paths)
     assert deps.store_error is None
-    assert deps.cli_status() == {"cli_found": False, "mcp_found": False}
+    assert set(deps.cli_status()) == {"cli_found", "mcp_found"}
     assert deps.comfy_port() == 8188
 
 

@@ -4,6 +4,7 @@ The host is injected (`host_factory`) so this module stays free of the
 Linux-only PTY code and runs under any test.
 """
 
+import logging
 import os
 import secrets
 import time
@@ -18,6 +19,8 @@ DETACHED_LIMIT_SECONDS = 43200
 TICK_SECONDS = 30
 HIGH_WATER = 1 << 20
 BOOT_BYTES = 8
+
+log = logging.getLogger("harness")
 
 
 class Sink(Protocol):
@@ -90,6 +93,7 @@ class SessionManager:
                 self._clear()
             message = error.strerror or str(error)
             raise Refusal("spawn_failed", message) from error
+        log.info("session started: %s", cli_id)
 
     def attach(self, sink: Sink, cols: int, rows: int) -> None:
         if self._host is None:
@@ -122,6 +126,7 @@ class SessionManager:
         host, sink = self._host, self._sink
         if host is None:
             return
+        log.info("session ended: %s stopped (%s)", self._cli_id, reason)
         self._clear()
         await host.kill()
         if sink is not None:
@@ -165,6 +170,7 @@ class SessionManager:
         if host is not self._host:
             return
         sink = self._sink
+        log.info("session ended: %s exited with code %d", self._cli_id, code)
         self._clear()
         if sink is not None:
             self._send_json(sink, {"type": "exit", "code": code})
