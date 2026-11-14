@@ -277,11 +277,14 @@ async def test_idle_needs_no_page_and_no_output_for_1800_seconds(mgr, host, cloc
     assert mgr.info() is None and host.killed == 1
 
 
-async def test_idle_stop_reports_idle_to_no_one_and_limit_is_not_hit_early(mgr, host, clock):
+async def test_idle_stops_at_exactly_the_idle_boundary(mgr, host, clock):
     a = FakeSink()
     mgr.start(a, "claude", 80, 24, False)
     mgr.detach(a)
-    clock.advance(IDLE_SECONDS)
+    clock.advance(IDLE_SECONDS - 1)
+    await mgr.tick()
+    assert mgr.info() is not None
+    clock.advance(1)
     await mgr.tick()
     assert mgr.info() is None
 
@@ -412,10 +415,122 @@ def test_a_sink_that_raises_on_exit_notice_does_not_break_the_manager(mgr, host)
     assert mgr.info() is None
 
 
-def test_output_without_a_sink_is_discarded_but_counts_as_activity(mgr, host, clock):
+async def test_output_without_a_sink_is_discarded_but_counts_as_activity(mgr, host, clock):
     a = FakeSink()
     mgr.start(a, "claude", 80, 24, False)
     mgr.detach(a)
     clock.advance(IDLE_SECONDS - 1)
     host.on_output(b"x")
     assert a.bytes == []
+    clock.advance(IDLE_SECONDS - 1)
+    await mgr.tick()
+    assert mgr.info() is not None
+    clock.advance(1)
+    await mgr.tick()
+    assert mgr.info() is None
+
+
+def test_pause_then_takeover_resumes_output(mgr, host):
+    a, b = FakeSink(), FakeSink()
+    mgr.start(a, "claude", 80, 24, False)
+    a.pending = HIGH_WATER + 1
+    host.on_output(b"big")
+    mgr.attach(b, 80, 24)
+    assert host.resumed == 1
+
+
+def test_pause_then_detach_resumes_output(mgr, host):
+    a = FakeSink()
+    mgr.start(a, "claude", 80, 24, False)
+    a.pending = HIGH_WATER + 1
+    host.on_output(b"big")
+    mgr.detach(a)
+    assert host.resumed == 1
+
+
+def test_pause_then_send_error_resumes_output(mgr, host):
+    a = FakeSink()
+    mgr.start(a, "claude", 80, 24, False)
+    a.pending = HIGH_WATER + 1
+    host.on_output(b"big")
+    a.broken = True
+    host.on_output(b"more")
+    assert host.resumed == 1
+
+
+def test_resume_is_only_called_when_paused(mgr, host):
+    a, b = FakeSink(), FakeSink()
+    mgr.start(a, "claude", 80, 24, False)
+    mgr.attach(b, 80, 24)
+    mgr.detach(b)
+    assert host.resumed == 0
+
+
+def test_drained_clears_the_paused_flag(mgr, host):
+    a = FakeSink()
+    mgr.start(a, "claude", 80, 24, False)
+    a.pending = HIGH_WATER + 1
+    host.on_output(b"big")
+    mgr.drained(a)
+    mgr.detach(a)
+    assert host.resumed == 1
+
+
+def test_high_water_boundary_is_exclusive(mgr, host):
+    a = FakeSink()
+    mgr.start(a, "claude", 80, 24, False)
+    a.pending = HIGH_WATER
+    host.on_output(b"x")
+    assert host.paused == 0
+    a.pending = HIGH_WATER + 1
+    host.on_output(b"x")
+    assert host.paused == 1
+
+
+def test_env_comes_from_build_env_of_os_environ(mgr, host, monkeypatch):
+    monkeypatch.setenv("COMFYUI_HARNESS_X", "secret")
+    monkeypatch.setenv("KEEP_ME", "1")
+    mgr.start(FakeSink(), "claude", 80, 24, False)
+    env = host.started.env
+    assert "COMFYUI_HARNESS_X" not in env
+    assert env["KEEP_ME"] == "1" and env["TERM"] == "xterm-256color"
+
+
+async def test_late_callbacks_from_a_stopped_host_are_ignored(store, clock):
+    old, new = FakeHost(), FakeHost()
+    hosts = iter([old, new])
+    mgr = SessionManager(lambda: next(hosts), store, CWD, lambda: 1, clock)
+    a, b = FakeSink(), FakeSink()
+    mgr.start(a, "claude", 80, 24, False)
+    await mgr.stop("stop")
+    mgr.start(b, "claude", 80, 24, False)
+    old.on_output(b"ghost")
+    old.on_exit(9)
+    assert b.bytes == [] and b.json == []
+    assert mgr.info() is not None
+    new.on_output(b"real")
+    assert b.bytes == [b"real"]
+
+
+class ExitsAtOnce(FakeHost):
+    def start(self, argv, cwd, env, cols, rows, on_output, on_exit):
+        super().start(argv, cwd, env, cols, rows, on_output, on_exit)
+        on_exit(5)
+
+
+def test_exit_during_start_is_not_ignored(store, clock):
+    mgr = SessionManager(ExitsAtOnce, store, CWD, lambda: 1, clock)
+    a = FakeSink()
+    mgr.start(a, "claude", 80, 24, False)
+    assert a.json == [{"type": "exit", "code": 5}]
+    assert mgr.info() is None
+
+
+def test_failed_start_leaves_no_session_or_sink(mgr, host):
+    a = FakeSink()
+    host.start_error = OSError(13, "Permission denied")
+    with pytest.raises(Refusal):
+        mgr.start(a, "claude", 80, 24, False)
+    assert mgr.info() is None
+    mgr.attach(a, 80, 24)
+    assert host.nudged == 0

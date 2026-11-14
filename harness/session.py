@@ -49,6 +49,7 @@ class SessionManager:
         self._sink: Optional[Sink] = None
         self._last_detach = 0.0
         self._last_output = 0.0
+        self._paused = False
 
     def info(self) -> Optional[dict]:
         if self._host is None:
@@ -66,6 +67,14 @@ class SessionManager:
         argv = cli_mod.build_argv(cli, exe, mcp, resume)
         env = cli_mod.build_env(os.environ)
         host = self._host_factory()
+        now = self._clock()
+        self._host = host
+        self._cli_id = cli_id
+        self._started = time.time()
+        self._sink = sink
+        self._last_detach = now
+        self._last_output = now
+        self._paused = False
         try:
             host.start(
                 argv,
@@ -77,15 +86,10 @@ class SessionManager:
                 lambda code: self._on_exit(host, code),
             )
         except OSError as error:
+            if self._host is host:
+                self._clear()
             message = error.strerror or str(error)
             raise Refusal("spawn_failed", message) from error
-        now = self._clock()
-        self._host = host
-        self._cli_id = cli_id
-        self._started = time.time()
-        self._sink = sink
-        self._last_detach = now
-        self._last_output = now
 
     def attach(self, sink: Sink, cols: int, rows: int) -> None:
         if self._host is None:
@@ -93,6 +97,7 @@ class SessionManager:
         previous = self._sink
         if previous is not None and previous is not sink:
             self._send_json(previous, {"type": "detached", "reason": "taken_over"})
+        self._resume_if_paused()
         self._sink = sink
         self._host.resize(cols, rows)
         self._host.nudge_redraw()
@@ -111,7 +116,7 @@ class SessionManager:
 
     def drained(self, sink: Sink) -> None:
         if self._host is not None and sink is self._sink:
-            self._host.resume_output()
+            self._resume_if_paused()
 
     async def stop(self, reason: str) -> None:
         host, sink = self._host, self._sink
@@ -152,7 +157,8 @@ class SessionManager:
         except Exception:
             self._drop_sink()
             return
-        if backlog > HIGH_WATER:
+        if backlog > HIGH_WATER and not self._paused:
+            self._paused = True
             host.pause_output()
 
     def _on_exit(self, host: Any, code: int) -> None:
@@ -163,7 +169,13 @@ class SessionManager:
         if sink is not None:
             self._send_json(sink, {"type": "exit", "code": code})
 
+    def _resume_if_paused(self) -> None:
+        if self._paused and self._host is not None:
+            self._paused = False
+            self._host.resume_output()
+
     def _drop_sink(self) -> None:
+        self._resume_if_paused()
         self._sink = None
         self._last_detach = self._clock()
 
@@ -171,6 +183,7 @@ class SessionManager:
         self._host = None
         self._sink = None
         self._cli_id = ""
+        self._paused = False
 
     def _send_json(self, sink: Sink, message: dict) -> None:
         try:
