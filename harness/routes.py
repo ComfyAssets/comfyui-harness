@@ -14,15 +14,15 @@ from typing import Any, Awaitable, Callable, Optional
 
 from aiohttp import web
 
-from harness.guard import (
+from .guard import (
     Refusal,
     classify,
     is_secure_origin,
     refusal_response,
     require_paired,
 )
-from harness.pairing import COOKIE_IDLE, Pairing
-from harness.store import Browser, Store, StoreError
+from .pairing import COOKIE_IDLE, Pairing
+from .store import Browser, Store, StoreError
 
 log = logging.getLogger("harness")
 

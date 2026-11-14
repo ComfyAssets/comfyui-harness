@@ -5,7 +5,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import web
 
-from harness.store import Browser
+from .store import Browser
 
 STATUS = {
     "not_paired": 401,

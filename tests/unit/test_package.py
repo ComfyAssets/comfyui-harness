@@ -35,3 +35,10 @@ def test_root_module_declares_comfyui_contract():
     assert spec is not None
     assert 'WEB_DIRECTORY = "./web"' in src
     assert "NODE_CLASS_MAPPINGS" in src
+
+
+def test_harness_modules_use_no_absolute_harness_imports():
+    # ComfyUI loads the node by path, so `harness` is not importable by name there.
+    pattern = re.compile(r"^\s*(from\s+harness\b|import\s+harness\b)", re.M)
+    for path in (ROOT / "harness").glob("*.py"):
+        assert not pattern.search(path.read_text()), path.name

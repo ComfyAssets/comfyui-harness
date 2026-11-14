@@ -16,7 +16,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
-from harness.store import Browser, State, Store
+from .store import Browser, State, Store
 
 ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # Crockford base32
 REQUEST_TTL = 300
