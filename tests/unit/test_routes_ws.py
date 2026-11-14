@@ -49,13 +49,13 @@ def made():
 @pytest.fixture(autouse=True)
 def sessions(deps, host, store, made, monkeypatch):
     monkeypatch.setattr(cli_mod, "find", fake_find)
-    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda path, port: False)
+    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda path, url: False)
 
     def factory():
         made.append(host)
         return host
 
-    deps.sessions = SessionManager(factory, store, CWD, lambda: 8188)
+    deps.sessions = SessionManager(factory, store, CWD, lambda: "http://127.0.0.1:8188")
     return deps.sessions
 
 

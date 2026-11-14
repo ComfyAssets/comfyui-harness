@@ -52,7 +52,7 @@ def store(tmp_path):
 @pytest.fixture(autouse=True)
 def fake_cli(monkeypatch):
     monkeypatch.setattr(cli_mod, "find", lambda cli_id: EXE)
-    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda path, port: True)
+    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda path, url: True)
 
 
 @pytest.fixture
@@ -69,7 +69,7 @@ def made(host):
 
 @pytest.fixture
 def mgr(made, store, clock):
-    return SessionManager(made, store, CWD, lambda: 8188, clock)
+    return SessionManager(made, store, CWD, lambda: "http://127.0.0.1:8188", clock)
 
 
 def test_start_runs_the_cli_in_the_given_cwd_with_mcp_file(mgr, host, store):
@@ -81,16 +81,16 @@ def test_start_runs_the_cli_in_the_given_cwd_with_mcp_file(mgr, host, store):
 
 
 def test_start_without_mcp_server_omits_the_flag(mgr, host, monkeypatch):
-    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda path, port: False)
+    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda path, url: False)
     mgr.start(FakeSink(), "claude", 80, 24, False)
     assert host.started.argv == [str(EXE)]
 
 
-def test_start_passes_the_comfy_port_to_the_mcp_file(mgr, monkeypatch):
+def test_start_passes_the_comfy_url_to_the_mcp_file(mgr, monkeypatch):
     seen = []
-    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda p, port: seen.append(port))
+    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda p, url: seen.append(url))
     mgr.start(FakeSink(), "claude", 80, 24, False)
-    assert seen == [8188]
+    assert seen == ["http://127.0.0.1:8188"]
 
 
 def test_start_with_resume_adds_continue(mgr, host):

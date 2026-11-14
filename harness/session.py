@@ -38,13 +38,13 @@ class SessionManager:
         host_factory: Callable[[], Any],
         store: Any,
         cwd: Path,
-        comfy_port: Callable[[], int],
+        comfy_url: Callable[[], str],
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._host_factory = host_factory
         self._store = store
         self._cwd = cwd
-        self._comfy_port = comfy_port
+        self._comfy_url = comfy_url
         self._clock = clock
         self.boot = secrets.token_hex(BOOT_BYTES)
         self._host: Any = None
@@ -70,7 +70,7 @@ class SessionManager:
             return
         exe = self._find(cli_id)
         cli = cli_mod.CLIS[cli_id]
-        wrote = cli_mod.write_mcp_file(self._store.mcp_path, self._comfy_port())
+        wrote = cli_mod.write_mcp_file(self._store.mcp_path, self._comfy_url())
         mcp = self._store.mcp_path if wrote else None
         argv = cli_mod.build_argv(cli, exe, mcp, resume)
         env = cli_mod.build_env(os.environ)

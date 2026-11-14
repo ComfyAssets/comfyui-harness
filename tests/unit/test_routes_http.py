@@ -282,7 +282,7 @@ async def test_store_error_surfaces_on_every_route(aiohttp_client, deps, code, m
         sessions=None,
         supported=True,
         node_dir=deps.node_dir,
-        comfy_port=lambda: 8188,
+        comfy_url=lambda: "http://127.0.0.1:8188",
         cli_status=lambda: {},
         clock=deps.clock,
     )
@@ -373,7 +373,21 @@ async def test_install_registers_only_the_plain_prefix(monkeypatch, tmp_path):
     assert not any(p.startswith("/api") for p in paths)
     assert deps.store_error is None
     assert set(deps.cli_status()) == {"cli_found", "mcp_found"}
-    assert deps.comfy_port() == 8188
+    assert deps.comfy_url() == "http://127.0.0.1:8188"
+
+
+async def test_install_builds_the_mcp_url_from_listen_tls_and_the_live_port(
+    monkeypatch, tmp_path, comfy_args
+):
+    from harness.routes import install
+
+    fake_folder_paths(monkeypatch, tmp_path / "user" / "__harness")
+    comfy_args.listen = "0.0.0.0,::"
+    comfy_args.tls_keyfile = "/etc/comfy/key.pem"
+    server = FakePromptServer()
+    deps = install(server)
+    server.port = 9443  # ComfyUI sets the port when it starts listening
+    assert deps.comfy_url() == "https://127.0.0.1:9443"
 
 
 async def test_install_keeps_a_store_error_for_the_routes(monkeypatch, tmp_path):

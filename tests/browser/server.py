@@ -54,12 +54,12 @@ def build_app(root: Path, port: int) -> tuple[web.Application, Path]:
         sessions=None,
         supported=sys.platform == "linux",
         node_dir=REPO,
-        comfy_port=lambda: port,
+        comfy_url=lambda: f"http://{HOST}:{port}",
         cli_status=cli.status,
     )
     work = root / "work"
     work.mkdir()
-    deps.sessions = _session_manager(store, work, deps.comfy_port)
+    deps.sessions = _session_manager(store, work, deps.comfy_url)
     app = web.Application()
     routes = web.RouteTableDef()
     setup(routes, deps)

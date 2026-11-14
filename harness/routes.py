@@ -49,7 +49,7 @@ class Deps:
     sessions: Optional[SessionManager]
     supported: bool
     node_dir: Path
-    comfy_port: Callable[[], int]
+    comfy_url: Callable[[], str]
     cli_status: Callable[[], dict]
     clock: Callable[[], float] = time.time
     terminal: Optional[Terminal] = None
@@ -252,7 +252,7 @@ def _supported() -> bool:
     return sys.platform == "linux"
 
 
-def _session_manager(store: Store, cwd: Path, comfy_port: Callable[[], int]) -> SessionManager:
+def _session_manager(store: Store, cwd: Path, comfy_url: Callable[[], str]) -> SessionManager:
     """Linux only: session_host imports fcntl, pty and termios."""
     from .session_host import PtySessionHost, reap_stale
 
@@ -261,7 +261,7 @@ def _session_manager(store: Store, cwd: Path, comfy_port: Callable[[], int]) -> 
         host_factory=lambda: PtySessionHost(asyncio.get_running_loop(), store.pid_path),
         store=store,
         cwd=cwd,
-        comfy_port=comfy_port,
+        comfy_url=comfy_url,
     )
 
 
@@ -290,6 +290,10 @@ def install(prompt_server: Any) -> Deps:
         store_error = error
         log.error("harness data directory unusable: %s", error.code)
     supported = _supported()
+    from comfy.cli_args import args  # type: ignore[import-not-found]  # only inside ComfyUI
+
+    listen = args.listen
+    tls = bool(args.tls_keyfile)
     deps = Deps(
         store=store,
         store_error=store_error,
@@ -297,11 +301,11 @@ def install(prompt_server: Any) -> Deps:
         sessions=None,
         supported=supported,
         node_dir=node_dir,
-        comfy_port=lambda: prompt_server.port,
+        comfy_url=lambda: cli.comfy_url(listen, prompt_server.port, tls),
         cli_status=cli.status,
     )
     if supported and store is not None:
-        deps.sessions = _session_manager(store, Path(folder_paths.base_path), deps.comfy_port)
+        deps.sessions = _session_manager(store, Path(folder_paths.base_path), deps.comfy_url)
     setup(prompt_server.routes, deps)
     watch_app(prompt_server.app, deps)
     return deps

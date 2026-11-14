@@ -43,6 +43,22 @@ def store(tmp_path):
     return s
 
 
+@pytest.fixture(autouse=True)
+def comfy_args(monkeypatch):
+    """ComfyUI's parsed command line, as install() reads it from comfy.cli_args."""
+    import sys
+    import types
+
+    args = SimpleNamespace(listen="127.0.0.1", tls_keyfile=None)
+    package = types.ModuleType("comfy")
+    module = types.ModuleType("comfy.cli_args")
+    module.args = args  # type: ignore[attr-defined]
+    package.cli_args = module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "comfy", package)
+    monkeypatch.setitem(sys.modules, "comfy.cli_args", module)
+    return args
+
+
 @pytest.fixture
 def deps(store, clock, node_dir):
     return Deps(
@@ -52,7 +68,7 @@ def deps(store, clock, node_dir):
         sessions=None,
         supported=True,
         node_dir=node_dir,
-        comfy_port=lambda: 8188,
+        comfy_url=lambda: "http://127.0.0.1:8188",
         cli_status=lambda: {"cli_found": True, "mcp_found": False},
         clock=clock,
     )

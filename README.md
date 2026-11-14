@@ -11,7 +11,7 @@ Only browsers you pair with `pair.py` can reach the terminal. Read [SECURITY.md]
 - Linux.
 - ComfyUI 0.45.0 or later, Python 3.10 or later.
 - Claude Code installed and logged in, on the machine that runs ComfyUI (and inside the container, if ComfyUI runs in one).
-- Optional: `pip install comfy-mcp`, in an environment where `comfy-mcp` is found on the `PATH` of the ComfyUI server (or next to its Python). Without it the terminal still works; the agent just has no ComfyUI tools.
+- Optional: `pip install comfy-mcp`. The harness looks for `comfy-mcp` next to the Python that runs ComfyUI first (so installing it into ComfyUI's venv works even when the venv is not activated, as under systemd), then on the server's `PATH`, then in `~/.local/bin`. The agent reaches ComfyUI at the address ComfyUI listens on (loopback when it listens on all addresses), over HTTPS when ComfyUI was started with `--tls-keyfile`. Without `comfy-mcp` the terminal still works; the agent just has no ComfyUI tools.
 
 ## Install
 

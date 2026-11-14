@@ -4,6 +4,7 @@ The browser only ever sends an id; everything about the program comes from the
 fixed table below. This module starts no processes.
 """
 
+import ipaddress
 import json
 import os
 import secrets
@@ -58,19 +59,67 @@ def _is_runnable(candidate: Path) -> bool:
     return candidate.is_file() and os.access(candidate, os.X_OK)
 
 
-def find(cli_id: str, path: Optional[str] = None, home: Optional[Path] = None) -> Path:
-    cli = CLIS[cli_id]
+def _search_path(path: Optional[str], home: Optional[Path]) -> list[str]:
+    """The absolute PATH entries, then ~/.local/bin."""
     if path is None:
         path = os.environ.get("PATH", "")
     if home is None:
         home = Path.home()
     directories = [d for d in path.split(os.pathsep) if d and os.path.isabs(d)]
     directories.append(str(home / ".local" / "bin"))
+    return directories
+
+
+def find(cli_id: str, path: Optional[str] = None, home: Optional[Path] = None) -> Path:
+    cli = CLIS[cli_id]
+    directories = _search_path(path, home)
     for directory in directories:
         candidate = Path(directory) / cli.executable
         if _is_runnable(candidate):
             return candidate
     raise CliNotFound(cli.executable, tuple(directories))
+
+
+def find_mcp_server(
+    python: Optional[str] = None,
+    path: Optional[str] = None,
+    home: Optional[Path] = None,
+) -> Optional[Path]:
+    """comfy-mcp next to the server's Python (an unactivated venv), then PATH, then ~/.local/bin."""
+    if python is None:
+        python = sys.executable
+    directories = [str(Path(python).parent), *_search_path(path, home)]
+    for directory in directories:
+        candidate = Path(directory) / MCP_SERVER
+        if _is_runnable(candidate):
+            return candidate
+    return None
+
+
+def _reachable_host(listen_host: str) -> str:
+    """A wildcard listen address is reached through loopback of the same family."""
+    if not listen_host:
+        return "127.0.0.1"
+    try:
+        address = ipaddress.ip_address(listen_host)
+    except ValueError:
+        return listen_host  # a host name
+    if address.is_unspecified:
+        return "127.0.0.1" if address.version == 4 else "::1"
+    return listen_host
+
+
+def comfy_url(listen: Optional[str], port: int, tls: bool) -> str:
+    """The address the agent's MCP server reaches ComfyUI at, from ComfyUI's own flags.
+
+    `listen` is ComfyUI's --listen value: one address or several, comma-separated.
+    A wildcard address is reached through the loopback address of the same family.
+    """
+    host = (listen or "").split(",")[0].strip().strip("[]")
+    host = _reachable_host(host)
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{'https' if tls else 'http'}://{host}:{port}"
 
 
 def _comfy_bin(which: Which, python: str) -> Optional[str]:
@@ -100,22 +149,26 @@ def _write_private_atomically(target: Path, data: bytes) -> None:
 
 def write_mcp_file(
     mcp_path: Path,
-    port: int,
+    url: str,
     which: Which = shutil.which,
-    python: str = sys.executable,
+    python: Optional[str] = None,
+    path: Optional[str] = None,
+    home: Optional[Path] = None,
 ) -> bool:
-    server = which(MCP_SERVER)
+    if python is None:
+        python = sys.executable
+    server = find_mcp_server(python, path, home)
     if server is None:
         try:
             os.unlink(mcp_path)
         except FileNotFoundError:
             pass
         return False
-    env = {"COMFYUI_URL": f"http://127.0.0.1:{port}"}
+    env = {"COMFYUI_URL": url}
     comfy = _comfy_bin(which, python)
     if comfy is not None:
         env["COMFY_BIN"] = comfy
-    config = {"mcpServers": {MCP_SERVER: {"command": server, "env": env}}}
+    config = {"mcpServers": {MCP_SERVER: {"command": str(server), "env": env}}}
     _write_private_atomically(mcp_path, json.dumps(config, indent=2).encode())
     return True
 
@@ -146,11 +199,11 @@ def build_env(base: Mapping[str, str]) -> dict[str, str]:
 def status(
     path: Optional[str] = None,
     home: Optional[Path] = None,
-    which: Which = shutil.which,
+    python: Optional[str] = None,
 ) -> dict[str, bool]:
     try:
         find("claude", path, home)
         cli_found = True
     except CliNotFound:
         cli_found = False
-    return {"cli_found": cli_found, "mcp_found": which(MCP_SERVER) is not None}
+    return {"cli_found": cli_found, "mcp_found": find_mcp_server(python, path, home) is not None}
