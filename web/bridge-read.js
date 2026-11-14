@@ -32,6 +32,11 @@ export function findNode(graph, id) {
   return null;
 }
 
+// id -> node, built once per call and reused for every link end.
+function nodeIndex(graph) {
+  return new Map(nodesOf(graph).map((n) => [String(n.id), n]));
+}
+
 function nodesOf(graph) {
   return Array.isArray(graph?.nodes) ? graph.nodes : [];
 }
@@ -230,12 +235,12 @@ function isSubgraphNode(node) {
   }
 }
 
-// With a type table: not registered. Without one: the frontend flagged the
-// node (has_errors is what a missing type leaves on a plain LGraphNode).
+// Missing means the type is not registered. Without a type table nothing is
+// marked missing: has_errors is also set for validation errors, so it says
+// nothing about the type.
 function isMissing(node, types) {
-  if (isSubgraphNode(node)) return false;
-  if (types) return lookupType(types, node.type) === null;
-  return node.has_errors === true;
+  if (!types || isSubgraphNode(node)) return false;
+  return lookupType(types, node.type) === null;
 }
 
 function comboValues(widget) {
@@ -298,12 +303,12 @@ function widgetDetail(widget) {
   return out;
 }
 
-function inputDetail(graph, node, input, slot) {
+function inputDetail(graph, byId, input, slot) {
   const out = { name: input?.name ?? String(slot), type: input?.type ?? "*", from: null };
   if (input?.widget?.name) out.widget = input.widget.name;
   const link = linkOf(graph, input?.link);
   if (link) {
-    const origin = findNode(graph, link.origin_id);
+    const origin = byId.get(String(link.origin_id));
     out.from = {
       id: String(link.origin_id),
       output: slotName(origin?.outputs, link.origin_slot),
@@ -313,12 +318,12 @@ function inputDetail(graph, node, input, slot) {
   return out;
 }
 
-function outputDetail(graph, output, slot) {
+function outputDetail(graph, byId, output, slot) {
   const to = [];
   for (const linkId of output?.links ?? []) {
     const link = linkOf(graph, linkId);
     if (!link) continue;
-    const target = findNode(graph, link.target_id);
+    const target = byId.get(String(link.target_id));
     to.push({
       id: String(link.target_id),
       input: slotName(target?.inputs, link.target_slot),
@@ -330,6 +335,7 @@ function outputDetail(graph, output, slot) {
 
 // The get_nodes shape (spec 6.5), JSON-safe.
 export function nodeDetail(graph, node, types) {
+  const byId = nodeIndex(graph);
   const detail = {
     id: String(node.id),
     type: node.type,
@@ -339,8 +345,8 @@ export function nodeDetail(graph, node, types) {
     pos: [...(node.pos ?? [0, 0])],
     size: [...(node.size ?? [0, 0])],
     widgets: widgetsOf(node).map(widgetDetail),
-    inputs: (node.inputs ?? []).map((input, slot) => inputDetail(graph, node, input, slot)),
-    outputs: (node.outputs ?? []).map((output, slot) => outputDetail(graph, output, slot)),
+    inputs: (node.inputs ?? []).map((input, slot) => inputDetail(graph, byId, input, slot)),
+    outputs: (node.outputs ?? []).map((output, slot) => outputDetail(graph, byId, output, slot)),
   };
   if (isSubgraphNode(node)) detail.subgraph = true;
   if (isMissing(node, types)) detail.missing = true;
@@ -395,7 +401,7 @@ function topologicalOrder(graph) {
   return order;
 }
 
-function nodeLines(graph, node, types, level) {
+function nodeLines(graph, byId, node, types, level) {
   const tags = [];
   if (isSubgraphNode(node)) tags.push("[subgraph]");
   else if (isMissing(node, types)) tags.push("[missing]");
@@ -416,7 +422,7 @@ function nodeLines(graph, node, types, level) {
   (node.inputs ?? []).forEach((input) => {
     const link = linkOf(graph, input?.link);
     if (!link) return;
-    const origin = findNode(graph, link.origin_id);
+    const origin = byId.get(String(link.origin_id));
     incoming.push(`${input.name}: #${link.origin_id}.${slotName(origin?.outputs, link.origin_slot)}`);
   });
   if (incoming.length > 0) lines.push(`    <- ${incoming.join(", ")}`);
@@ -427,7 +433,7 @@ function nodeLines(graph, node, types, level) {
     for (const linkId of output?.links ?? []) {
       const link = linkOf(graph, linkId);
       if (!link) continue;
-      const target = findNode(graph, link.target_id);
+      const target = byId.get(String(link.target_id));
       targets.push(`#${link.target_id}.${slotName(target?.inputs, link.target_slot)}`);
     }
     if (targets.length > 0) outgoing.push(`${output.name || output.type || slot}: ${targets.join(", ")}`);
@@ -457,11 +463,12 @@ function clampBudget(maxChars) {
 // groups only; node_count is always the real count.
 export function outline(graph, { maxChars = LIMITS.outlineDefault, types } = {}) {
   const budget = clampBudget(maxChars);
+  const byId = nodeIndex(graph);
   const ordered = topologicalOrder(graph);
   const members = groupMembers(graph);
   const tail = groupsIndex(members);
   for (const level of ["full", "no_values", "no_titles"]) {
-    const lines = ordered.flatMap((node) => nodeLines(graph, node, types, level));
+    const lines = ordered.flatMap((node) => nodeLines(graph, byId, node, types, level));
     const text = [...lines, ...tail].join("\n");
     if (text.length <= budget) return { text, node_count: ordered.length, detail: level };
   }

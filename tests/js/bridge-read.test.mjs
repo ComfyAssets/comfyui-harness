@@ -267,9 +267,30 @@ test("a node whose type is not installed is marked [missing], a subgraph node [s
   assert.ok(lines[1].includes("[missing]"));
   assert.ok(lines[2].includes("[subgraph]"));
   assert.ok(!lines[2].includes("[missing]"));
-  // without a type table the frontend's own has_errors flag is the signal
+  // without a type table nothing is ever marked missing
   g.getNodeById("2").has_errors = true;
-  assert.ok(outline(g, { maxChars: 10000 }).text.split("\n")[1].includes("[missing]"));
+  assert.ok(!outline(g, { maxChars: 10000 }).text.includes("[missing]"));
+  assert.equal(nodeDetail(g, g.getNodeById("2")).missing, undefined);
+});
+
+test("a registered node with has_errors is not [missing], in the outline or the detail", () => {
+  const g = fakeGraph({ nodes: [{ id: 1, type: "KSampler" }, { id: 2, type: "Nope" }] });
+  g.getNodeById("1").has_errors = true;
+  const lines = outline(g, { maxChars: 10000, types: TYPES }).text.split("\n");
+  assert.ok(!lines[0].includes("[missing]"));
+  assert.ok(lines[1].includes("[missing]"));
+  assert.equal(nodeDetail(g, g.getNodeById("1"), TYPES).missing, undefined);
+  assert.equal(nodeDetail(g, g.getNodeById("2"), TYPES).missing, true);
+});
+
+test("a 2000-node graph with dense links outlines in good time", () => {
+  const g = bigGraph(2000);
+  for (let i = 3; i <= 2000; i++) g.addNode({ id: 5000 + i, type: "Sink", inputs: [{ name: "in", type: "X" }] });
+  for (let i = 3; i <= 2000; i++) g.connect(i - 2, 0, 5000 + i, 0);
+  const start = Date.now();
+  const out = outline(g, { maxChars: LIMITS.outlineMax });
+  assert.equal(out.node_count, 3998);
+  assert.ok(Date.now() - start < 5000);
 });
 
 test("group membership follows geometry after a node is moved out of a group", () => {
