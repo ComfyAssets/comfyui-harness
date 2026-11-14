@@ -202,7 +202,7 @@ GET, `Sec-Fetch-Site: same-origin`. Everything else is **unpaired**.
 
 | Route | Method | Unpaired | Paired | Body in, body out |
 |---|---|---|---|---|
-| `/harness/status` | GET | yes | yes | out: `{supported, paired, enabled}`; paired callers also get `{cli_found, mcp_found, session}` |
+| `/harness/status` | GET | yes | yes | out: `{supported, paired, enabled}`; paired callers also get `{cli_found, mcp_found, session, origin}` (origin: the address this browser paired from) |
 | `/harness/pair/request` | POST | yes | yes | out: `{code, poll_secret, expires_in, command, docker_command}` |
 | `/harness/pair/poll` | POST | yes | yes | header `X-Harness-Poll`; out: `{state: waiting, rejected, expired, paired}` |
 | `/harness/pair/browsers` | GET | no | yes | out: list of `{id, label, origin, created, last_seen, current}` |
