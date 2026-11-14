@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -874,3 +875,119 @@ async def test_a_drop_right_after_the_reply_keeps_the_reply() -> None:
     rig.bridge.reply(rig.sink, ok(rig.sink.frames[0], {"kept": True}))
     rig.bridge.drop(rig.sink)
     assert await task == {"kept": True}
+
+
+OP_NAMES = (
+    '"add_node", "remove_node", "set_widget", "connect", '
+    '"disconnect", "set_mode", "set_title", "move_node"'
+)
+
+
+@pytest.mark.parametrize(
+    "op,problem",
+    [
+        (
+            {"op": "connect", "from": "8", "output": 0, "input": "image"},
+            "arguments.ops[1].to is required",
+        ),
+        (
+            {"op": "remove_node", "node": "3", "extra": 1},
+            "arguments.ops[1].extra is not allowed",
+        ),
+        (
+            {"op": "set_mode", "node": "3", "mode": "on"},
+            'arguments.ops[1].mode must be one of "active", "bypass", "mute"',
+        ),
+        (
+            {"op": "move_node", "node": "3", "pos": "left"},
+            "arguments.ops[1].pos must be array",
+        ),
+        (
+            {"op": "set_title", "node": 1.5, "title": "t"},
+            "arguments.ops[1].node must be string or integer",
+        ),
+        ({"op": "explode", "node": "3"}, f"arguments.ops[1].op must be one of {OP_NAMES}"),
+        ({"node": "3"}, f"arguments.ops[1].op must be one of {OP_NAMES}"),
+        ("remove_node", "arguments.ops[1] must be object"),
+    ],
+)
+def test_a_bad_edit_op_names_the_field_and_what_is_valid(op: Any, problem: str) -> None:
+    good = {"op": "remove_node", "node": "1"}
+    args = {"fingerprint": "f", "ops": [good, op], "summary": "s"}
+    assert validate(schema("edit"), args) == problem
+
+
+async def test_a_page_error_is_logged_as_page_error_whatever_its_text(caplog: Any) -> None:
+    caplog.set_level(logging.DEBUG, logger="harness")
+    rig = Rig()
+    assert rig.sink is not None
+    task = asyncio.create_task(rig.bridge.call_tool("get_errors", {}))
+    await settle()
+    rig.bridge.reply(rig.sink, fail(rig.sink.frames[0], {"code": "x", "message": BUSY}))
+    with pytest.raises(ToolError) as err:
+        await task
+    assert err.value.message == BUSY
+    lines = [r.getMessage() for r in caplog.records if "bridge get_errors" in r.getMessage()]
+    assert len(lines) == 1
+    assert " page_error " in lines[0] and "busy" not in lines[0]
+
+
+async def test_get_outputs_resolves_at_most_500_files(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    (rig.dirs["output"] / "a.png").write_bytes(b"png")
+    file = {"filename": "a.png", "subfolder": "", "type": "output"}
+    result = await answer_outputs(
+        rig, [{"node": "1", "files": [file] * 400}, {"node": "2", "files": [file] * 101}]
+    )
+    paths = [p for entry in result["outputs"] for p in entry["paths"]]
+    assert len(paths) == 500
+    assert result["skipped"] == 1
+    assert [len(e["paths"]) for e in result["outputs"]] == [400, 100]
+
+
+async def test_a_failure_landing_with_a_cancellation_is_never_left_unretrieved() -> None:
+    loop = asyncio.get_running_loop()
+    seen: List[dict] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: seen.append(context))
+    try:
+        rig = Rig()
+        assert rig.sink is not None
+        task = asyncio.create_task(rig.bridge.call_tool("get_errors", {}))
+        await settle()
+        rig.bridge.drop(rig.sink)  # sets the exception on the reply future ...
+        task.cancel()  # ... and the caller goes away in the same tick
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        del task
+        gc.collect()
+        await settle()
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+    assert not [c for c in seen if "never retrieved" in str(c.get("message"))]
+
+
+async def test_an_abandoned_reply_future_with_an_exception_never_warns() -> None:
+    # White box: through the public API the task always retrieves the exception, so
+    # check the future the bridge makes for a reply directly.
+    loop = asyncio.get_running_loop()
+    seen: List[dict] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: seen.append(context))
+    try:
+        future = Rig().bridge._new_future()
+        future.set_exception(ToolError(UNKNOWN))
+        await settle()
+        del future
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+    assert not [c for c in seen if "never retrieved" in str(c.get("message"))]
+
+
+async def test_a_cancelled_reply_future_is_harmless() -> None:
+    future = Rig().bridge._new_future()
+    future.cancel()
+    await settle()
+    assert future.cancelled()

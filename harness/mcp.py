@@ -118,16 +118,52 @@ def _check_scalar(schema: dict, value: Any, path: str) -> Optional[str]:
     return None
 
 
+TAG = "op"
+
+
+def _tag_options(branches: Sequence[Any]) -> Optional[list]:
+    """The tag values when every branch is an object tagged by an `op` enum; else None."""
+    options: list = []
+    for branch in branches:
+        if not isinstance(branch, dict) or branch.get("type") != "object":
+            return None
+        tag = branch.get("properties", {}).get(TAG)
+        if not isinstance(tag, dict) or not isinstance(tag.get("enum"), list):
+            return None
+        options.extend(tag["enum"])
+    return options
+
+
+def _check_one_of(branches: Sequence[dict], value: Any, path: str) -> Optional[str]:
+    options = _tag_options(branches)
+    if options is None:
+        matches = sum(1 for sub in branches if validate(sub, value, path) is None)
+        return None if matches == 1 else f"{path} must match exactly one of the allowed shapes"
+    if not isinstance(value, dict):
+        return f"{path} must be object"
+    tag = value.get(TAG)
+    for branch in branches:
+        if any(_same(tag, option) for option in branch["properties"][TAG]["enum"]):
+            return validate(branch, value, path)
+    names = ", ".join(json.dumps(o) for o in options)
+    return f"{path}.{TAG} must be one of {names}"
+
+
 def validate(schema: dict, value: Any, path: str = "arguments") -> Optional[str]:
-    """Check `value` against a small JSON Schema subset; None means valid."""
+    """Check `value` against a small JSON Schema subset; None means valid.
+
+    A `oneOf` whose branches are objects tagged by an `op` enum is checked against
+    the branch its `op` names, so the problem names the field; any other `oneOf`
+    needs exactly one branch to match.
+    """
     if "type" in schema:
         problem = _check_type(schema, value, path)
         if problem:
             return problem
     if "oneOf" in schema:
-        matches = sum(1 for sub in schema["oneOf"] if validate(sub, value, path) is None)
-        if matches != 1:
-            return f"{path} must match exactly one of the allowed shapes"
+        problem = _check_one_of(schema["oneOf"], value, path)
+        if problem:
+            return problem
     checks = _check_scalar(schema, value, path)
     if checks:
         return checks

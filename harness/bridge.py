@@ -45,6 +45,7 @@ PAGE_FAILED = "The page could not do that."
 TYPES_OR_SEARCH = "Give either types or search, not both and not neither."
 
 OUTPUT_KINDS = ("output", "temp", "input")
+MAX_OUTPUT_FILES = 500  # files resolved per get_outputs reply; the rest count as skipped
 
 # ---------------------------------------------------------------------------
 # Tool table (spec 6.5)
@@ -285,23 +286,30 @@ def _node_key(value: Any) -> bool:
 
 
 def _resolve_outputs(dirs: Mapping[str, Path], result: dict) -> dict:
+    """Turn page entries into checked paths; at most MAX_OUTPUT_FILES are resolved."""
     entries = result.get("outputs")
     outputs: List[dict] = []
     skipped = 0
+    budget = MAX_OUTPUT_FILES
     for entry in entries if isinstance(entries, list) else ():
         files = entry.get("files") if isinstance(entry, dict) else None
         if not isinstance(files, list) or not _node_key(entry.get("node")):
             skipped += 1
             continue
-        paths = [_output_path(dirs, file) for file in files]
+        paths = [_output_path(dirs, file) for file in files[:budget]]
+        budget -= len(paths)
         kept = [path for path in paths if path is not None]
-        skipped += len(paths) - len(kept)
+        skipped += len(files) - len(kept)
         outputs.append({"node": entry["node"], "paths": kept})
     return {**result, "outputs": outputs, "skipped": skipped}
 
 
 # ---------------------------------------------------------------------------
 # The relay
+
+
+class _PageError(ToolError):
+    """An error the page reported. Its text is the page's, so it is never logged."""
 
 
 def _page_error(error: Any) -> str:
@@ -374,7 +382,7 @@ class Bridge:
         if ok is True and isinstance(message.get("result"), dict):
             future.set_result(message["result"])
         elif ok is False:
-            future.set_exception(ToolError(_page_error(message.get("error"))))
+            future.set_exception(_PageError(_page_error(message.get("error"))))
 
     def drop(self, sink: "Sink") -> None:
         """Fail every call waiting on `sink`. Synchronous and idempotent."""
@@ -407,7 +415,7 @@ class Bridge:
             outcome = "ok"
             return result
         except ToolError as err:
-            outcome = _outcome_word(err.message)
+            outcome = _outcome_word(err)
             raise
         finally:
             took = time.monotonic() - started
@@ -433,12 +441,19 @@ class Bridge:
             return _resolve_outputs(self._output_dirs(), result)
         return result
 
+    def _new_future(self) -> "asyncio.Future[dict]":
+        future: "asyncio.Future[dict]" = asyncio.get_running_loop().create_future()
+        # Retrieve any exception so a failure that lands as its caller goes away is not
+        # reported as "Future exception was never retrieved".
+        future.add_done_callback(lambda done: done.cancelled() or done.exception())
+        return future
+
     async def _relay(self, name: str, args: dict) -> dict:
         sink = self._attached()
         if sink is None:
             raise ToolError(NO_PAGE)
         rid = uuid.uuid4().hex
-        future: "asyncio.Future[dict]" = asyncio.get_running_loop().create_future()
+        future = self._new_future()
         self._waiting[rid] = (sink, future)
         try:
             sink.send_json({"type": "bridge", "rid": rid, "cmd": name, "args": dict(args)})
@@ -460,9 +475,11 @@ _OUTCOMES = {
 }
 
 
-def _outcome_word(message: str) -> str:
-    """A fixed word for the log; page text is never logged."""
-    return _OUTCOMES.get(message, "page_error")
+def _outcome_word(err: ToolError) -> str:
+    """A fixed word for the log; page text is never logged or trusted to pick a word."""
+    if isinstance(err, _PageError):
+        return "page_error"
+    return _OUTCOMES.get(err.message, "failed")
 
 
 __all__ = ["MAX_REPLY", "QUEUE_LIMIT", "SECRET_BYTES", "TIMEOUT", "TOOLS", "Bridge"]

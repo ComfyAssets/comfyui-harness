@@ -356,6 +356,65 @@ def test_validate_one_of() -> None:
     assert validate(both, 1) is not None
 
 
+def _shape(name: str, fields: Dict[str, Any], required: List[str]) -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {"op": {"type": "string", "enum": [name]}, **fields},
+        "required": ["op", *required],
+        "additionalProperties": False,
+    }
+
+
+TAGGED = {
+    "oneOf": [
+        _shape("move", {"to": {"type": "integer"}}, ["to"]),
+        _shape("paint", {"colour": {"enum": ["red", "blue"]}}, ["colour"]),
+    ]
+}
+
+
+def test_a_tagged_one_of_reports_the_chosen_shapes_own_problem() -> None:
+    assert validate(TAGGED, {"op": "move", "to": 3}, "arguments.ops[3]") is None
+    assert validate(TAGGED, {"op": "move"}, "arguments.ops[3]") == "arguments.ops[3].to is required"
+    assert (
+        validate(TAGGED, {"op": "move", "to": 3, "x": 1}, "arguments.ops[3]")
+        == "arguments.ops[3].x is not allowed"
+    )
+    assert (
+        validate(TAGGED, {"op": "move", "to": "a"}, "arguments.ops[3]")
+        == "arguments.ops[3].to must be integer"
+    )
+    assert (
+        validate(TAGGED, {"op": "paint", "colour": "green"}, "arguments.ops[3]")
+        == 'arguments.ops[3].colour must be one of "red", "blue"'
+    )
+
+
+@pytest.mark.parametrize("value", [{}, {"op": "jump"}, {"op": 1}, {"op": None, "to": 1}])
+def test_a_tagged_one_of_with_an_unknown_or_missing_tag_lists_the_tags(value: Any) -> None:
+    assert validate(TAGGED, value, "arguments.ops[3]") == (
+        'arguments.ops[3].op must be one of "move", "paint"'
+    )
+
+
+def test_a_tagged_one_of_given_a_non_object_says_so() -> None:
+    assert validate(TAGGED, "move", "arguments.ops[0]") == "arguments.ops[0] must be object"
+
+
+def test_a_one_of_without_a_tag_keeps_the_exactly_one_rule() -> None:
+    untagged = {
+        "oneOf": [
+            {"type": "object", "properties": {"a": {"type": "integer"}}, "required": ["a"]},
+            {"type": "object", "properties": {"b": {"type": "integer"}}, "required": ["b"]},
+        ]
+    }
+    assert validate(untagged, {"a": 1}) is None
+    assert validate(untagged, {}) == "arguments must match exactly one of the allowed shapes"
+    assert validate(untagged, {"a": 1, "b": 2}) == (
+        "arguments must match exactly one of the allowed shapes"
+    )
+
+
 def test_validate_custom_path() -> None:
     msg = validate({"type": "string"}, 1, "thing")
     assert msg is not None and msg.startswith("thing")
