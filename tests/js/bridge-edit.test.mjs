@@ -200,7 +200,7 @@ test("one beforeChange and one afterChange wrap the whole batch", async () => {
     { op: "connect", from: 8, output: 0, to: "a", input: 0 },
     { op: "set_widget", node: 12, widget: "cfg", value: 7 },
   ]);
-  assert.deepEqual(host.log, ["capture", "beforeChange", "afterChange"]);
+  assert.deepEqual(host.log, ["capture", "snapshot", "beforeChange", "afterChange"]);
   assert.equal(tracker.undoQueue.length, length + 1);
   assert.equal(tracker.depth(), 0);
 });
@@ -386,7 +386,7 @@ test("a widget the node rewrites is reported with what it holds now", async () =
   const host = fakeHost({
     graph,
     types: TYPES,
-    rewrite: (node, widget, value) => (widget.name === "steps" ? value / 2 : value),
+    rewrite: (_node, widget, value) => (widget.name === "steps" ? value / 2 : value),
   });
   const result = await applyOps(host, [
     { op: "set_widget", node: 12, widget: "steps", value: 100 },
@@ -489,11 +489,103 @@ test("an author change not yet captured stays its own undo step", async () => {
   const tracker = host.tracker();
   findNode(graph, 1).widgets[0].value = 768; // the author typed; not captured yet
   await applyOps(host, [{ op: "set_widget", node: 12, widget: "steps", value: 40 }]);
-  assert.deepEqual(host.log.slice(0, 2), ["capture", "beforeChange"]);
+  assert.deepEqual(host.log.slice(0, 3), ["capture", "snapshot", "beforeChange"]);
   assert.equal(tracker.undoQueue.length, 2);
   await tracker.undo();
   assert.equal(findNode(graph, 12).widgets[1].value, 25);
   assert.equal(findNode(graph, 1).widgets[0].value, 768);
+});
+
+const boom = (text) => () => {
+  throw new Error(text);
+};
+
+const FAILING_BATCH = [
+  { op: "add_node", ref: "a", type: "PreviewImage" },
+  { op: "set_widget", node: 12, widget: "steps", value: 30 },
+  { op: "move_node", node: 1, pos: [70, 80] },
+  { op: "connect", from: 8, output: 0, to: "a", input: 0 },
+];
+
+test("when undo rejects, the copy taken before the batch is restored", async () => {
+  const graph = canvas();
+  const host = fakeHost({ graph, types: TYPES, faults: { connect: boom("link refused"), undo: boom("undo broke") } });
+  authorStep(host, graph);
+  const before = serialize(graph);
+  const err = await refused(applyOps(host, FAILING_BATCH));
+  assert.equal(err.code, "failed");
+  assert.equal(err.message, "Op 4 (connect): link refused");
+  assert.equal(host.tracker().undoCalls, 1);
+  assert.equal(host.restoreCalls, 1);
+  assert.equal(serialize(graph), before);
+});
+
+test("when the tracker records nothing but ops changed the graph, the copy is restored", async () => {
+  const graph = canvas();
+  const host = fakeHost({ graph, types: TYPES, faults: { connect: boom("link refused") } });
+  const before = serialize(graph);
+  host.tracker().paused = true;
+  const err = await refused(applyOps(host, FAILING_BATCH));
+  assert.equal(err.message, "Op 4 (connect): link refused");
+  assert.equal(host.tracker().undoCalls, 0);
+  assert.equal(host.restoreCalls, 1);
+  assert.equal(serialize(graph), before);
+});
+
+test("a move alone that is not recorded is still put back", async () => {
+  const graph = canvas();
+  const host = fakeHost({ graph, types: TYPES, faults: { disconnect: boom("stuck") } });
+  host.tracker().paused = true;
+  const before = serialize(graph);
+  await refused(applyOps(host, [{ op: "move_node", node: 1, pos: [70, 80] }, { op: "disconnect", node: 8, input: 0 }]));
+  assert.equal(host.restoreCalls, 1);
+  assert.equal(serialize(graph), before);
+});
+
+test("when nothing changed, neither undo nor restore is called", async () => {
+  const graph = canvas();
+  const host = fakeHost({ graph, types: TYPES, faults: { removeNode: boom("cannot remove") } });
+  authorStep(host, graph);
+  const err = await refused(applyOps(host, [{ op: "remove_node", node: 20 }]));
+  assert.equal(err.message, "Op 1 (remove_node): cannot remove");
+  assert.equal(host.tracker().undoCalls, 0);
+  assert.equal(host.restoreCalls, 0);
+  assert.ok(!host.log.includes("restore"));
+});
+
+test("when restore also fails, the message names the op and points to Ctrl+Z", async () => {
+  const graph = canvas();
+  const host = fakeHost({
+    graph,
+    types: TYPES,
+    faults: { connect: boom("link refused"), undo: boom("undo broke"), restore: boom("restore broke") },
+  });
+  const err = await refused(applyOps(host, FAILING_BATCH));
+  assert.ok(err instanceof BridgeError);
+  assert.equal(err.code, "failed");
+  assert.match(err.message, /^Op 4 \(connect\): link refused\. The canvas may be partly changed; Ctrl\+Z may help\.$/);
+});
+
+test("afterChange throwing after a good batch becomes failed and is rolled back", async () => {
+  const graph = canvas();
+  const host = fakeHost({ graph, types: TYPES, faults: { afterChange: boom("tracker broke") } });
+  const before = serialize(graph);
+  const err = await refused(applyOps(host, [{ op: "set_widget", node: 12, widget: "steps", value: 30 }]));
+  assert.ok(err instanceof BridgeError);
+  assert.equal(err.code, "failed");
+  assert.equal(err.message, "The page could not finish the edit: tracker broke");
+  assert.equal(host.tracker().undoCalls, 1);
+  assert.equal(serialize(graph), before);
+});
+
+test("afterChange throwing after a failed op keeps the op's error", async () => {
+  const graph = canvas();
+  const host = fakeHost({ graph, types: TYPES, faults: { connect: boom("link refused"), afterChange: boom("tracker broke") } });
+  const before = serialize(graph);
+  const err = await refused(applyOps(host, FAILING_BATCH));
+  assert.equal(err.code, "failed");
+  assert.equal(err.message, "Op 4 (connect): link refused");
+  assert.equal(serialize(graph), before);
 });
 
 // ------------------------------------------------------------- placement

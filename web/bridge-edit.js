@@ -12,9 +12,14 @@
 //   host.disconnect(node, inIndex)
 //   host.setWidget(node, widgetObject, value)   value, then the widget's callback
 //   host.tracker() -> { capture, depth, beforeChange, afterChange, undo, mark }
+//   host.snapshot() -> an opaque copy of the shown graph; applyOps takes it
+//     after tracker.capture() and before beforeChange()
+//   async host.restore(copy) -> loads that copy back into the shown graph,
+//     replacing node objects; used when a failed batch recorded no undo step
+//     although it changed the graph, or when undo rejected
 // Titles, modes and positions are plain node properties and are set directly.
 
-import { findNode, isMissing, lookupType, rectOf } from "./bridge-read.js";
+import { findNode, fingerprint, isMissing, lookupType, rectOf } from "./bridge-read.js";
 
 export class BridgeError extends Error {
   constructor(code, message) {
@@ -522,7 +527,7 @@ function reasonOf(err) {
 }
 
 // Runs every step inside one beforeChange/afterChange pair. Returns the step
-// that threw and the error, or null.
+// that threw (null when only afterChange threw) and the error, or null.
 function runSteps(ctx, tracker, steps) {
   let failure = null;
   tracker.beforeChange();
@@ -534,17 +539,58 @@ function runSteps(ctx, tracker, steps) {
     placeNew(ctx);
   } catch (err) {
     failure = { step: ctx.failedAt, err };
-  } finally {
+  }
+  try {
     tracker.afterChange();
+  } catch (err) {
+    failure ??= { step: null, err };
   }
   return failure;
+}
+
+// Structure (the fingerprint) plus every node's position, so a batch that
+// only moved or placed nodes still counts as a change.
+function graphKey(graph) {
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
+  const places = nodes
+    .map((n) => [String(n.id), Array.from(n.pos ?? [])])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return fingerprint(graph, null) + JSON.stringify(places);
+}
+
+// Puts the canvas back after a failed batch and never undoes a step the
+// batch did not record. True when the canvas is as it was before the batch.
+async function rollBack(host, tracker, before, copy, keyBefore) {
+  if (tracker.mark() !== before) {
+    try {
+      await tracker.undo();
+      return true;
+    } catch {
+      // fall through to the copy
+    }
+  } else if (graphKey(host.graph()) === keyBefore) {
+    return true; // nothing changed: touch nothing
+  }
+  try {
+    await host.restore(copy);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function failedMessage({ step, err }, restored) {
+  const head = step ? `Op ${step.n} (${step.kind}): ` : "The page could not finish the edit: ";
+  const tail = restored ? "" : ". The canvas may be partly changed; Ctrl+Z may help.";
+  return head + reasonOf(err) + tail;
 }
 
 // Applies a batch as one undo step. Validates it first (validateOps) so a
 // caller that skipped validation still changes nothing on a bad batch.
 // Resolves { ids, widgets, counts }; rejects with BridgeError busy, invalid
-// or failed. On failed, the canvas is put back by one undo, and only when
-// this batch recorded a step of its own.
+// or failed. On failed, the canvas is put back: by one undo when this batch
+// recorded a step of its own, else (or when undo rejects) from the copy taken
+// before the batch; left alone when the batch changed nothing.
 export async function applyOps(host, ops) {
   const tracker = host.tracker();
   if (tracker.depth() !== 0) throw new BridgeError("busy", BUSY);
@@ -553,6 +599,8 @@ export async function applyOps(host, ops) {
 
   tracker.capture(); // an author change not yet recorded stays its own step
   const before = tracker.mark();
+  const copy = host.snapshot();
+  const keyBefore = graphKey(graph);
   const ctx = {
     host,
     graph,
@@ -565,15 +613,7 @@ export async function applyOps(host, ops) {
   const failure = runSteps(ctx, tracker, steps);
   if (!failure) return { ids: ctx.ids, widgets: ctx.widgets, counts: ctx.counts };
 
-  // Node objects are not used past this point: undo reloads the graph.
-  let note = "";
-  if (tracker.mark() !== before) {
-    try {
-      await tracker.undo();
-    } catch {
-      note = " The page could not put the canvas back; Ctrl+Z undoes the partial edit.";
-    }
-  }
-  const { step, err } = failure;
-  throw new BridgeError("failed", `Op ${step.n} (${step.kind}): ${reasonOf(err)}${note}`);
+  // Node objects are not used past this point: undo and restore reload the graph.
+  const restored = await rollBack(host, tracker, before, copy, keyBefore);
+  throw new BridgeError("failed", failedMessage(failure, restored));
 }

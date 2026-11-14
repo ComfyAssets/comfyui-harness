@@ -49,19 +49,23 @@ function restore(graph, state) {
 
 // ------------------------------------------------------------- tracker
 
-export function fakeTracker(graph, log) {
+// faults.undo / faults.afterChange: a function that throws to simulate the
+// page failing. tracker.paused = true makes captureCanvasState return early,
+// as it does during a restore or a graph load.
+export function fakeTracker(graph, log, faults = {}) {
   let activeState = { state: serialize(graph) };
   const t = {
     undoQueue: [],
     redoQueue: [],
     changeCount: 0,
     undoCalls: 0,
+    paused: false,
     capture() {
       log.push("capture");
       t.captureCanvasState();
     },
     captureCanvasState() {
-      if (t.changeCount > 0) return;
+      if (t.changeCount > 0 || t.paused) return;
       const now = serialize(graph);
       if (now === activeState.state) return;
       t.undoQueue.push(activeState);
@@ -79,11 +83,13 @@ export function fakeTracker(graph, log) {
     afterChange() {
       log.push("afterChange");
       if (--t.changeCount === 0) t.captureCanvasState();
+      faults.afterChange?.();
     },
     async undo() {
       log.push("undo");
       t.undoCalls++;
       await Promise.resolve();
+      faults.undo?.();
       const prev = t.undoQueue.pop();
       if (!prev) return;
       t.redoQueue.push(activeState);
@@ -149,12 +155,14 @@ function nextId(graph) {
 
 // ---------------------------------------------------------------- host
 
-// faults: { createNode, removeNode, connect, disconnect, setWidget } — a
-// function that throws to simulate the page failing mid-batch.
+// faults: { createNode, removeNode, connect, disconnect, setWidget, undo,
+// afterChange, restore } — a function that throws to simulate the page
+// failing. snapshot() copies the shown graph; restore(copy) is async and,
+// like undo, rebuilds every node object.
 // rewrite(node, widget, value): what the widget's callback leaves behind.
 export function fakeHost({ graph, types, center = [0, 0], faults = {}, rewrite } = {}) {
   const log = [];
-  const tracker = fakeTracker(graph, log);
+  const tracker = fakeTracker(graph, log, faults);
   const fault = (name) => faults[name]?.();
   const host = {
     log,
@@ -162,6 +170,18 @@ export function fakeHost({ graph, types, center = [0, 0], faults = {}, rewrite }
     types: () => types,
     tracker: () => tracker,
     viewCenter: () => [...center],
+    restoreCalls: 0,
+    snapshot() {
+      log.push("snapshot");
+      return serialize(graph);
+    },
+    async restore(copy) {
+      log.push("restore");
+      host.restoreCalls++;
+      await Promise.resolve();
+      fault("restore");
+      restore(graph, copy);
+    },
     createNode(type) {
       fault("createNode");
       const def = types[type];
