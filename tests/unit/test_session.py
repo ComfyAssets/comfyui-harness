@@ -5,7 +5,7 @@ import pytest
 
 from conftest import FakeHost
 from harness import cli as cli_mod
-from harness.cli import CliNotFound
+from harness.cli import CliNotFound, McpEntries
 from harness.guard import Refusal
 from harness.session import (
     DETACHED_LIMIT_SECONDS,
@@ -14,6 +14,8 @@ from harness.session import (
     SessionManager,
 )
 
+BOTH = McpEntries(comfy=True, canvas=True)
+NEITHER = McpEntries(comfy=False, canvas=False)
 CWD = Path("/work/dir")
 EXE = Path("/bin/claude")
 
@@ -52,7 +54,7 @@ def store(tmp_path):
 @pytest.fixture(autouse=True)
 def fake_cli(monkeypatch):
     monkeypatch.setattr(cli_mod, "find", lambda cli_id: EXE)
-    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda path, url: True)
+    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda path, url, **kw: BOTH)
 
 
 @pytest.fixture
@@ -81,14 +83,14 @@ def test_start_runs_the_cli_in_the_given_cwd_with_mcp_file(mgr, host, store):
 
 
 def test_start_without_mcp_server_omits_the_flag(mgr, host, monkeypatch):
-    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda path, url: False)
+    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda path, url, **kw: NEITHER)
     mgr.start(FakeSink(), "claude", 80, 24, False)
     assert host.started.argv == [str(EXE)]
 
 
 def test_start_passes_the_comfy_url_to_the_mcp_file(mgr, monkeypatch):
     seen = []
-    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda p, url: seen.append(url))
+    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda p, url, **kw: seen.append(url) or BOTH)
     mgr.start(FakeSink(), "claude", 80, 24, False)
     assert seen == ["http://127.0.0.1:8188"]
 
@@ -141,7 +143,7 @@ def test_spawn_runtime_error_becomes_spawn_failed_and_leaves_no_dead_host(mgr, h
 
 
 def test_unwritable_mcp_file_becomes_spawn_failed(mgr, made, monkeypatch):
-    def unwritable(path, url):
+    def unwritable(path, url, **kw):
         raise IsADirectoryError(21, "Is a directory", str(path))
 
     monkeypatch.setattr(cli_mod, "write_mcp_file", unwritable)
@@ -532,3 +534,116 @@ def test_unknown_cli_message_echoes_at_most_32_characters(mgr, monkeypatch):
     assert caught.value.code == "cli_not_found"
     assert "a" * 32 in caught.value.message
     assert "a" * 33 not in caught.value.message
+
+
+class FakeBridge:
+    def __init__(self, secret="s" * 64):
+        self.secret = secret
+        self.opened = 0
+        self.closed = 0
+        self.dropped = []
+
+    def open_session(self):
+        self.opened += 1
+        return self.secret
+
+    def close_session(self):
+        self.closed += 1
+
+    def drop(self, sink):
+        self.dropped.append(sink)
+
+
+@pytest.fixture
+def bridge():
+    return FakeBridge()
+
+
+@pytest.fixture
+def bmgr(made, store, clock, bridge):
+    return SessionManager(made, store, CWD, lambda: "http://127.0.0.1:8188", clock, bridge=bridge)
+
+
+def test_start_asks_the_bridge_for_a_secret_and_writes_it(bmgr, bridge, monkeypatch):
+    seen = []
+
+    def record(path, url, **kw):
+        seen.append((bridge.opened, kw))
+        return BOTH
+
+    monkeypatch.setattr(cli_mod, "write_mcp_file", record)
+    bmgr.start(FakeSink(), "claude", 80, 24, False)
+    assert seen == [(1, {"canvas_secret": "s" * 64})]
+
+
+def test_start_passes_mcp_config_when_only_the_canvas_entry_exists(bmgr, host, store, monkeypatch):
+    monkeypatch.setattr(
+        cli_mod, "write_mcp_file", lambda p, u, **kw: McpEntries(comfy=False, canvas=True)
+    )
+    bmgr.start(FakeSink(), "claude", 80, 24, False)
+    assert host.started.argv == [str(EXE), "--mcp-config", str(store.mcp_path)]
+
+
+def test_a_manager_without_a_bridge_behaves_as_before(mgr, host, monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda p, u, **kw: seen.append(kw) or BOTH)
+    a, b = FakeSink(), FakeSink()
+    mgr.start(a, "claude", 80, 24, False)
+    mgr.attach(b, 80, 24)
+    mgr.detach(b)
+    assert seen == [{"canvas_secret": None}]
+    assert host.started is not None
+
+
+def test_the_session_ending_closes_the_bridge_session_on_exit(bmgr, host, bridge):
+    bmgr.start(FakeSink(), "claude", 80, 24, False)
+    assert bridge.closed == 0
+    host.on_exit(0)
+    assert bridge.closed == 1
+
+
+async def test_the_session_ending_closes_the_bridge_session_on_stop(bmgr, bridge):
+    bmgr.start(FakeSink(), "claude", 80, 24, False)
+    await bmgr.stop("revoked")
+    assert bridge.closed == 1
+
+
+def test_a_failed_spawn_closes_the_bridge_session(bmgr, host, bridge):
+    host.start_error = RuntimeError("no")
+    with pytest.raises(Refusal):
+        bmgr.start(FakeSink(), "claude", 80, 24, False)
+    assert bridge.opened == 1 and bridge.closed == 1
+
+
+def test_a_failed_mcp_write_closes_the_bridge_session(bmgr, bridge, monkeypatch):
+    def unwritable(path, url, **kw):
+        raise IsADirectoryError(21, "Is a directory", str(path))
+
+    monkeypatch.setattr(cli_mod, "write_mcp_file", unwritable)
+    with pytest.raises(Refusal):
+        bmgr.start(FakeSink(), "claude", 80, 24, False)
+    assert bridge.closed == 1
+
+
+def test_a_takeover_drops_bridge_calls_waiting_on_the_old_page(bmgr, bridge):
+    old, new = FakeSink(), FakeSink()
+    bmgr.start(old, "claude", 80, 24, False)
+    bmgr.attach(new, 80, 24)
+    assert bridge.dropped == [old]
+    assert bmgr.sink is new
+
+
+def test_detach_drops_bridge_calls_waiting_on_that_page(bmgr, bridge):
+    sink = FakeSink()
+    bmgr.start(sink, "claude", 80, 24, False)
+    bmgr.detach(sink)
+    assert bridge.dropped == [sink]
+    assert bmgr.sink is None
+
+
+def test_a_broken_sink_is_dropped_from_the_bridge(bmgr, bridge):
+    sink = FakeSink()
+    bmgr.start(sink, "claude", 80, 24, False)
+    sink.broken = True
+    bmgr._on_output(bmgr._host, b"x")
+    assert bridge.dropped == [sink]

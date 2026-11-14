@@ -16,6 +16,7 @@ from harness.cli import (
     comfy_url,
     find_mcp_server,
     status,
+    McpEntries,
     write_mcp_file,
 )
 
@@ -150,7 +151,7 @@ def test_mcp_file_contents(tmp_path):
         which={"comfy": "/b/comfy"}.get,
         **lookup(tmp_path, python="/venv/bin/python"),
     )
-    assert ok and json.loads((tmp_path / "mcp.json").read_text()) == {
+    assert ok.comfy and json.loads((tmp_path / "mcp.json").read_text()) == {
         "mcpServers": {
             "comfy-mcp": {
                 "command": str(server),
@@ -219,13 +220,17 @@ def test_comfy_bin_is_omitted_when_comfy_is_nowhere(tmp_path):
 
 
 def test_mcp_file_is_not_written_when_comfy_mcp_is_missing(tmp_path):
-    assert write_mcp_file(tmp_path / "mcp.json", URL, which={}.get, **lookup(tmp_path)) is False
+    assert write_mcp_file(
+        tmp_path / "mcp.json", URL, which={}.get, **lookup(tmp_path)
+    ) == McpEntries(False, False)
     assert not (tmp_path / "mcp.json").exists()
 
 
 def test_stale_mcp_file_is_removed_when_comfy_mcp_is_missing(tmp_path):
     (tmp_path / "mcp.json").write_text("{}")
-    assert write_mcp_file(tmp_path / "mcp.json", URL, which={}.get, **lookup(tmp_path)) is False
+    assert write_mcp_file(
+        tmp_path / "mcp.json", URL, which={}.get, **lookup(tmp_path)
+    ) == McpEntries(False, False)
     assert not (tmp_path / "mcp.json").exists()
 
 
@@ -335,3 +340,59 @@ def test_failed_replace_removes_the_temp_file_and_raises(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         write_mcp_file(tmp_path / "out" / "mcp.json", URL, which={}.get, **lookup(tmp_path))
     assert list((tmp_path / "out").iterdir()) == []
+
+
+SECRET = "ab" * 32
+
+
+def read_config(tmp_path: Path) -> dict:
+    return json.loads((tmp_path / "mcp.json").read_text())["mcpServers"]
+
+
+def test_the_canvas_entry_is_http_with_a_bearer_header(tmp_path):
+    on_path(tmp_path)
+    got = write_mcp_file(
+        tmp_path / "mcp.json", URL + "/", which={}.get, canvas_secret=SECRET, **lookup(tmp_path)
+    )
+    assert got == McpEntries(comfy=True, canvas=True) and got.any
+    assert read_config(tmp_path)["canvas"] == {
+        "type": "http",
+        "url": URL + "/harness/mcp",
+        "headers": {"Authorization": "Bearer " + SECRET},
+    }
+    assert "comfy-mcp" in read_config(tmp_path)
+
+
+def test_the_file_has_only_canvas_when_comfy_mcp_is_missing(tmp_path):
+    got = write_mcp_file(
+        tmp_path / "mcp.json", URL, which={}.get, canvas_secret=SECRET, **lookup(tmp_path)
+    )
+    assert got == McpEntries(comfy=False, canvas=True)
+    assert list(read_config(tmp_path)) == ["canvas"]
+
+
+def test_the_file_is_removed_when_neither_entry_applies(tmp_path):
+    (tmp_path / "mcp.json").write_text("{}")
+    got = write_mcp_file(tmp_path / "mcp.json", URL, which={}.get, **lookup(tmp_path))
+    assert got == McpEntries(comfy=False, canvas=False) and not got.any
+    assert not (tmp_path / "mcp.json").exists()
+
+
+def test_no_canvas_entry_when_comfyui_serves_tls(tmp_path):
+    on_path(tmp_path)
+    got = write_mcp_file(
+        tmp_path / "mcp.json",
+        "https://127.0.0.1:8188",
+        which={}.get,
+        canvas_secret=SECRET,
+        **lookup(tmp_path),
+    )
+    assert got == McpEntries(comfy=True, canvas=False)
+    assert "canvas" not in read_config(tmp_path)
+
+
+def test_the_file_is_still_owner_only(tmp_path):
+    write_mcp_file(
+        tmp_path / "mcp.json", URL, which={}.get, canvas_secret=SECRET, **lookup(tmp_path)
+    )
+    assert stat.S_IMODE((tmp_path / "mcp.json").stat().st_mode) == 0o600

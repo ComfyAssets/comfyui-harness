@@ -40,12 +40,14 @@ class SessionManager:
         cwd: Path,
         comfy_url: Callable[[], str],
         clock: Callable[[], float] = time.monotonic,
+        bridge: Any = None,
     ) -> None:
         self._host_factory = host_factory
         self._store = store
         self._cwd = cwd
         self._comfy_url = comfy_url
         self._clock = clock
+        self._bridge = bridge
         self.boot = secrets.token_hex(BOOT_BYTES)
         self._host: Any = None
         self._cli_id = ""
@@ -60,6 +62,10 @@ class SessionManager:
             return None
         return {"cli": self._cli_id, "started": self._started}
 
+    @property
+    def sink(self) -> Optional[Sink]:
+        return self._sink
+
     def holds(self, sink: Sink) -> bool:
         """True if a session runs and this sink is the one attached to it."""
         return self._host is not None and sink is self._sink
@@ -70,12 +76,16 @@ class SessionManager:
             return
         exe = self._find(cli_id)
         cli = cli_mod.CLIS[cli_id]
+        secret = self._bridge.open_session() if self._bridge is not None else None
         try:
-            wrote = cli_mod.write_mcp_file(self._store.mcp_path, self._comfy_url())
+            wrote = cli_mod.write_mcp_file(
+                self._store.mcp_path, self._comfy_url(), canvas_secret=secret
+            )
         except OSError as error:
+            self._close_bridge_session()
             reason = error.strerror or type(error).__name__
             raise Refusal("spawn_failed", f"Could not write the MCP config: {reason}") from error
-        mcp = self._store.mcp_path if wrote else None
+        mcp = self._store.mcp_path if wrote.any else None
         argv = cli_mod.build_argv(cli, exe, mcp, resume)
         env = cli_mod.build_env(os.environ)
         host = self._host_factory()
@@ -114,6 +124,7 @@ class SessionManager:
             return
         previous = self._sink
         if previous is not None and previous is not sink:
+            self._drop_from_bridge(previous)
             self._send_json(previous, {"type": "detached", "reason": "taken_over"})
         self._resume_if_paused()
         self._sink = sink
@@ -196,11 +207,22 @@ class SessionManager:
             self._host.resume_output()
 
     def _drop_sink(self) -> None:
+        if self._sink is not None:
+            self._drop_from_bridge(self._sink)
         self._resume_if_paused()
         self._sink = None
         self._last_detach = self._clock()
 
+    def _drop_from_bridge(self, sink: Sink) -> None:
+        if self._bridge is not None:
+            self._bridge.drop(sink)
+
+    def _close_bridge_session(self) -> None:
+        if self._bridge is not None:
+            self._bridge.close_session()
+
     def _clear(self) -> None:
+        self._close_bridge_session()
         self._host = None
         self._sink = None
         self._cli_id = ""
