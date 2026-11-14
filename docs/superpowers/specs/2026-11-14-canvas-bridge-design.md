@@ -25,8 +25,8 @@ The author's own examples, which define success:
    reads saved workflows from disk (it already can) and builds parts of them
    into the open canvas.
 
-The author stays in charge: they press Run, they watch the edits land, they
-undo what they do not like.
+The author stays in charge: they watch the edits land and undo what they do
+not like. The agent presses Run only when the author asks it to.
 
 ## 2. Goals, non-goals, anti-goals
 
@@ -37,19 +37,21 @@ Goals:
   and the latest outputs.
 - It can change that workflow live: set widget values, add and remove nodes,
   connect and disconnect, bypass or mute, rename.
+- It can press Run for the author, when the author asks for that.
 - One request from the agent is one undo step.
 - An edit never lands on a canvas that changed since the agent last read it.
 - Nothing is reachable until the owner turns the bridge on. It is off by
   default and it is refused the moment it is turned off or the browser is
   revoked.
 - No new process, no new port, no new runtime dependency.
-- A small tool list. The read tools and the one edit tool are separate, so the
-  agent's own permission rules can allow reads and ask before edits.
+- A small tool list. The read tools, the edit tool and the run tool are
+  separate, so the agent's own permission rules can allow reads and ask
+  before edits and runs.
 
 Non-goals for this version:
 
-- Queueing a run. The author presses Run. (It is the one action that cannot be
-  undone; it can be added later as its own tool.)
+- Running anything other than the open workflow as it stands, cancelling or
+  reordering the queue, batch counts above one.
 - Driving the page beyond the canvas: menus, settings, tabs, opening or saving
   workflows, panning, screenshots.
 - Editing inside a subgraph the author has not opened, promoted widgets,
@@ -131,7 +133,7 @@ Avoided:
 - No general check for the user editing between read and write. Ours has a
   fingerprint on every edit.
 - Tool-list size (reported by users at 40k to 70k tokens) and all-or-nothing
-  tools. Ours is seven tools; reads and the edit are separate tools.
+  tools. Ours is eight tools; reads, the edit and the run are separate.
 - A "blind" switch that claimed the agent never sees images while another
   tool still returned them. Ours makes no such claim.
 - 39,000 lines, most of them repairs for the page and server disagreeing
@@ -276,7 +278,7 @@ synchronously on revoke and disable.
 
 ### 6.5 The tools
 
-Server name `canvas`. Seven tools. All text the agent receives is built by the
+Server name `canvas`. Eight tools. All text the agent receives is built by the
 page from the live graph.
 
 Read (each returns `fingerprint` and the workflow's name):
@@ -329,6 +331,29 @@ Result: `applied` (true or false), the new `fingerprint`, `ids` (ref to new
 node id), and for every `set_widget` the value the widget holds after the
 write. If it differs from what was asked, that op is listed under
 `changed_by_node` so the agent knows the write did not stick as sent.
+
+Run:
+
+`run` takes `fingerprint` and nothing else. It queues the open workflow once,
+exactly as the Run button does, with the widget values on the canvas. Its
+description tells the agent: call this only when the author has asked, in
+this conversation, for the workflow to be run; after an edit, tell the author
+it is ready to test instead of running it yourself.
+
+- The server refuses it unless "Allow runs" is on (section 9).
+- The page refuses it when the fingerprint is stale, so the agent can only
+  run what it has read.
+- It returns as soon as ComfyUI accepts or refuses the prompt: `queued` with
+  the prompt id and the queue position, or the validation errors ComfyUI
+  gave, joined to their nodes. It does not wait for the run to finish.
+- The read tools `get_errors` and `get_outputs` gain a `run` field
+  (`idle`, `running` with the node now executing, or `queued`), so the agent
+  can see when the run is done and then look at the result.
+- The panel's notice line says "Claude queued a run" with a **Cancel**
+  button that removes that prompt from the queue, or interrupts it if it has
+  started.
+- A run cannot be undone: it uses the GPU and writes output files. That is
+  why it has its own tool, its own switch and its own notice.
 
 ### 6.6 How an edit is applied
 
@@ -402,11 +427,11 @@ agent reads again.
 | `harness/mcp.py` | Pure JSON-RPC and MCP handling: parse, validate, dispatch to a tool callable, shape results and errors. No aiohttp, no state |
 | `harness/bridge.py` | The tool table and schemas, the session secret, the one-at-a-time queue, request ids and waiting replies, output path resolution, limits |
 | `harness/guard.py` | The new caller class (6.2) |
-| `harness/routes.py` | `POST /harness/mcp`; the two bridge switch routes (paired browsers only); status fields |
+| `harness/routes.py` | `POST /harness/mcp`; the three bridge switch routes (paired browsers only); status fields |
 | `harness/terminal.py` | Sends `bridge` frames to the socket holding the session; hands `bridge_reply` frames to the bridge; fails waiting calls on mute, close and takeover |
 | `harness/session.py` | Makes and clears the secret with the session; exposes the attached sink |
 | `harness/cli.py` | Writes the `canvas` entry (6.3) |
-| `harness/store.py` | `bridge_enabled` (default false) and `bridge_edits` (default true) in `state.json` |
+| `harness/store.py` | `bridge_enabled` (default false), `bridge_edits` (default true) and `bridge_runs` (default false) in `state.json` |
 | `web/bridge.js` | Pure functions over an injected graph and app: outline, node detail, fingerprint, validation, apply, placement. No import of ComfyUI's `app` |
 | `web/harness.js` | Routes bridge frames to `web/bridge.js` with the real `app`; shows the notice |
 | `web/settings.js` | The bridge rows (section 9) |
@@ -427,6 +452,8 @@ agent reads again.
 | Terminal disabled mid-call | Waiting calls fail at once (synchronously with the mute); the session stops, as today |
 | Stale fingerprint | "The canvas changed since you read it…" |
 | Edits switched off | "Edits are switched off in ComfyUI's Harness settings. Reading still works." |
+| Runs switched off | "Runs are switched off in ComfyUI's Harness settings. Ask the author to press Run." |
+| ComfyUI refuses the prompt | The validation errors, joined to their nodes |
 | Validation fails | Which op, why, and what would be valid |
 | ComfyUI restarts | The session ends as it does today; the secret is gone with it |
 
@@ -452,12 +479,22 @@ agent reads again.
   This is the read-only profile. It is server state and not a ComfyUI
   setting because anyone who can reach ComfyUI's port can write ComfyUI
   settings, paired or not.
-- Both switches are consent **for the server**, given by its owner, not per
+- **Allow runs** (server state, `bridge_runs`, default off). Changed only by
+  a paired browser. When off, the server refuses `run`. Its row says: "Lets
+  the agent press Run when you ask it to. A run uses your GPU and writes
+  output files, and cannot be undone."
+  What is enforced is the switch, the stale-canvas check and the visible
+  notice with Cancel. "Only when the author asks" is an instruction in the
+  tool's description that the agent follows; code cannot prove what was said
+  in the conversation, and the row says so. An owner who wants a hard stop
+  keeps the switch off, or sets their own Claude Code permissions to ask
+  before `run`.
+- All three switches are consent **for the server**, given by its owner, not per
   browser. With two paired browsers, either can hold the session and its
   bridge, exactly as either can hold the terminal today. Like every switch
   in this project they do not restrain the agent itself, which runs as the
   owner's account and can edit the state file; the settings rows say so.
-- Status gains `bridge_enabled`, `bridge_edits` and `bridge_available` (false with a reason
+- Status gains `bridge_enabled`, `bridge_edits`, `bridge_runs` and `bridge_available` (false with a reason
   when ComfyUI serves TLS itself or the platform is unsupported).
 
 The agent's own permission prompts are untouched: no CLI flag is added, and
@@ -480,6 +517,11 @@ Claude Code settings.
   and it is in the disclosure.
 - `get_outputs` returns paths only inside ComfyUI's output, temp and input
   directories, resolved on the server with symlinks followed and checked.
+- `run` is the one bridge action with effects outside the canvas. It queues
+  only the workflow open in the page, once, and only when its own switch is
+  on. It gives the agent nothing it could not already do by sending a
+  workflow to ComfyUI through `comfy-mcp`; what is new is that it runs the
+  author's unsaved canvas.
 - Nothing from the bridge is logged except tool names, durations and refusal
   codes.
 
@@ -495,6 +537,11 @@ Claude Code settings.
 - **Unit, added by the builder check:** the per-type frame limit; the secret
   cleared on switch-off and not revived on switch-on; `edit` refused by the
   server when edits are off; a revoked holder with another browser paired.
+- **Run:** refused by the server when runs are off; refused by the page on a
+  stale fingerprint; a refused prompt returns its errors; the notice's
+  Cancel removes a queued prompt and interrupts a running one; the `run`
+  field in the read tools. In the real-ComfyUI test the fake CLI runs a tiny
+  CPU workflow and then reads its output path.
 - **JavaScript (`node --test`):** `web/bridge.js` against a fake graph:
   outline and its shedding levels, node detail, fingerprint (changes on each
   structural edit, does not change on a move), every validation refusal,
@@ -514,12 +561,15 @@ Claude Code settings.
   with an `Origin`, with no secret, with an old secret, and with the bridge
   off.
 - **Manual (author, real Claude Code):** added to `docs/manual-checks.md`:
-  the three examples in section 1, through the proxy.
+  the three examples in section 1, through the proxy, and asking the agent
+  to run the workflow and then to look at the result.
 
 ## 12. Left to the builder
 
 - The exact frontend calls, verified against the pinned frontend 1.59.1 in a
-  short spike before the page work starts: the graph currently shown, node
+  short spike before the page work starts: queueing a prompt and reading its
+  id and errors, removing and interrupting a prompt, the graph currently
+  shown, node
   creation and removal, connect and disconnect, widget write with callback,
   the active workflow's change tracker and its undo, the selection, node
   errors, the last execution error, node outputs, registered node types.
@@ -543,10 +593,11 @@ Claude Code settings.
 | Built in this repository | Vito |
 | Edits land at once | Vito |
 | Learn from `artokun/comfyui-mcp`, its issues and pull requests | Vito |
-| No run tool in this version; the author presses Run | Claude, from "tells me to test"; to confirm |
+| The agent can press Run, but only when asked | Vito |
+| `run` is its own tool behind its own switch (off by default), needs a fresh fingerprint, queues once, shows a notice with Cancel; "only when asked" is an instruction, not an enforced check | Claude |
 | "Browser" means the canvas, selection, errors and outputs; no page driving | Claude; to confirm |
 | One batch `edit` tool, one undo step, with a fingerprint check | Claude |
-| Seven tools; reads separate from the edit | Claude |
+| Eight tools; reads, the edit and the run are separate | Claude |
 | Reuse the terminal socket; target is the page holding the session | Claude |
 | Per-session secret in the per-session `mcp.json`; no loopback check | Claude |
 | Bridge off by default with its own disclosure; a read-only switch | Claude, from the author's opt-in rule |
