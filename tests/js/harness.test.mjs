@@ -26,6 +26,7 @@ class FakeSocket {
   close() { this.closed = true; }
   json() { return this.sent.filter((d) => typeof d === "string").map((d) => JSON.parse(d)); }
   receive(message) { this.onmessage({ data: JSON.stringify(message) }); }
+  open() { this.onopen?.({}); }
   drop(code) { this.onclose({ code }); }
 }
 
@@ -53,6 +54,7 @@ function fakeTerminalModule() {
 
 function setup({ status = READY, values = {}, reduced = false, browsers = [], testFlag } = {}) {
   const timers = [];
+  const delays = [];
   FakeSocket.all = [];
   const state = { status };
   const document = fakeDocument();
@@ -74,7 +76,7 @@ function setup({ status = READY, values = {}, reduced = false, browsers = [], te
     WebSocket: FakeSocket,
     location: { protocol: "https:", host: "comfy.example" },
     matchMedia: (q) => ({ matches: reduced && q === "(prefers-reduced-motion: reduce)" }),
-    setTimeout: (fn) => { timers.push(fn); return timers.length; }, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {},
+    setTimeout: (fn, ms) => { timers.push(fn); delays.push(ms); return timers.length; }, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {},
   });
   harness.install();
   const press = (fields) => {
@@ -84,7 +86,7 @@ function setup({ status = READY, values = {}, reduced = false, browsers = [], te
   };
   const socket = () => FakeSocket.all.at(-1);
   const runTimers = () => { for (const fn of timers.splice(0)) fn(); };
-  return { window, runTimers, state, document, listeners, added, io, mod, loads: () => loads, harness, press, socket, panel: harness.panel, values };
+  return { window, runTimers, delays, pending: () => timers.length, state, document, listeners, added, io, mod, loads: () => loads, harness, press, socket, panel: harness.panel, values };
 }
 
 async function openReady(options) {
@@ -422,4 +424,67 @@ test("a page on another address than the paired one says so and does not connect
 test("a page on the paired address connects", async () => {
   await openReady({ status: { ...READY, origin: "https://comfy.example" } });
   assert.equal(FakeSocket.all.length, 1);
+});
+
+// Browsers report any refused handshake (401/403/409 before the upgrade) as close 1006.
+const statusFetches = (env) => env.io.calls.filter((c) => c.method === "GET" && c.url === "/harness/status").length;
+
+test("a refused handshake re-reads status and shows the pairing popup when unpaired", async () => {
+  const env = await openReady();
+  env.state.status = { supported: true, paired: false, enabled: true };
+  const before = statusFetches(env);
+  env.socket().drop(1006);
+  await flush();
+  assert.equal(statusFetches(env), before + 1);
+  assert.equal(env.harness.dialog.element.style.display, "block");
+  assert.equal(env.panel.isOpen(), false);
+  assert.equal(env.pending(), 0);
+  assert.equal(FakeSocket.all.length, 1);
+});
+
+test("a refused handshake shows the enable action when the terminal is switched off", async () => {
+  const env = await openReady();
+  env.state.status = { ...READY, enabled: false };
+  env.socket().drop(1006);
+  await flush();
+  assert.ok(byText(env.panel.element, "Turn the terminal on", "BUTTON"));
+  assert.equal(env.pending(), 0);
+  assert.equal(FakeSocket.all.length, 1);
+});
+
+test("a refused handshake on another address shows the paired-address message", async () => {
+  const env = await openReady();
+  env.state.status = { ...READY, origin: "https://other.example" };
+  env.socket().drop(1006);
+  await flush();
+  assert.ok(byText(env.panel.element, "This browser was paired from https://other.example. Open ComfyUI from that address."));
+  assert.equal(env.pending(), 0);
+});
+
+test("a refused handshake while still paired and on reconnects with backoff, one status read each", async () => {
+  const env = await openReady();
+  const before = statusFetches(env);
+  for (let i = 0; i < 4; i++) {
+    env.socket().drop(1006);
+    await flush();
+    assert.match(env.panel.element.textContent, /Reconnecting/);
+    assert.equal(env.pending(), 1);
+    env.runTimers();
+  }
+  assert.deepEqual(env.delays, [1000, 2000, 4000, 8000]);
+  assert.equal(statusFetches(env), before + 4);
+  assert.equal(FakeSocket.all.length, 5);
+  env.socket().open();
+  env.socket().receive({ type: "hello", boot: "b1", session: null });
+  assert.equal(env.panel.element.textContent.includes("Reconnecting"), false);
+});
+
+test("a refused handshake while the server is unreachable keeps retrying with backoff", async () => {
+  const env = await openReady();
+  env.state.status = Object.assign(new Error("Could not reach the server."), { code: "network" });
+  env.socket().drop(1006);
+  await flush();
+  assert.equal(env.pending(), 1);
+  assert.deepEqual(env.delays, [1000]);
+  assert.match(env.panel.element.textContent, /Reconnecting/);
 });

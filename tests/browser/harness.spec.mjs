@@ -200,6 +200,24 @@ test("a second page takes over and the first does not fight back", async ({ cont
   expect(log.since(mark).filter((l) => l.startsWith("READY")).length).toBe(1);
 });
 
+// A socket refused before the upgrade reaches the page only as close 1006; the page
+// used to read that as a dropped line and show "Reconnecting..." forever.
+test("a socket refused for lack of pairing shows the pairing popup", async ({ context }) => {
+  const first = await context.newPage();
+  await openPaired(first, dataDir());
+  await log.waitFor(/^READY /, mark);
+  const second = await context.newPage();
+  await second.goto("/");
+  await pressOnCanvas(second, "Backquote");
+  await expect(panelOf(first).getByRole("button", { name: "Use here" })).toBeVisible();
+
+  await context.clearCookies();
+  await first.bringToFront();
+  await panelOf(first).getByRole("button", { name: "Use here" }).click();
+  await expect(dialogOf(first)).toBeVisible({ timeout: 10_000 });
+  await expect(panelOf(first)).toBeHidden();
+});
+
 test("revoking this browser closes the terminal and asks to pair again", async ({ page }) => {
   await openPaired(page, dataDir());
   await log.waitFor(/^READY /, mark);

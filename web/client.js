@@ -77,15 +77,23 @@ export function openSocket({
   let delay = BACKOFF_START_MS;
   let stopped = false;
 
+  function schedule() {
+    timer = later(connect, delay);
+    delay = Math.min(delay * 2, BACKOFF_MAX_MS);
+  }
+
   function connect() {
     timer = null;
     const current = new Socket(url);
+    let opened = false;
     socket = current;
     current.binaryType = "arraybuffer";
     current.onopen = () => {
+      opened = true;
       delay = BACKOFF_START_MS;
     };
     current.onmessage = (event) => {
+      opened = true;
       if (typeof event.data === "string") {
         let message;
         try {
@@ -101,10 +109,13 @@ export function openSocket({
     };
     current.onclose = (event) => {
       if (FATAL_CLOSE_CODES.has(event.code)) stopped = true;
-      onClose({ code: event.code, willReconnect: !stopped });
-      if (stopped) return;
-      timer = later(connect, delay);
-      delay = Math.min(delay * 2, BACKOFF_MAX_MS);
+      // A refused handshake (401/403/409 before the upgrade) reaches the page only as
+      // close 1006 before open. Retrying it blindly would loop; the caller re-reads
+      // /status and calls retry() only when the refusal looks temporary.
+      const neverOpened = !opened && !stopped;
+      onClose({ code: event.code, willReconnect: !stopped && !neverOpened, neverOpened });
+      if (stopped || neverOpened) return;
+      schedule();
     };
   }
 
@@ -116,6 +127,10 @@ export function openSocket({
     },
     sendBytes(bytes) {
       socket?.send(bytes);
+    },
+    retry() {
+      if (stopped || timer !== null) return;
+      schedule();
     },
     close() {
       stopped = true;

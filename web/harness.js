@@ -169,7 +169,20 @@ export function createHarness({
     render();
   }
 
-  function onClose({ code, willReconnect }) {
+  function dropSocket() {
+    socket?.close();
+    socket = null;
+    socketState = "closed";
+    pendingResume = null;
+  }
+
+  function onClose({ code, willReconnect, neverOpened }) {
+    if (neverOpened) {
+      socketState = "lost";
+      render();
+      afterRefusedHandshake(socket);
+      return;
+    }
     if (willReconnect) {
       socketState = "lost";
     } else {
@@ -179,6 +192,26 @@ export function createHarness({
       if (code === 4401 && status) status = { ...status, paired: false };
       if (code === 4409 && status) status = { ...status, enabled: false };
       if (code === 4403) panel.showError("This page's origin was refused by the server.");
+    }
+    render();
+  }
+
+  // The browser hides why a handshake was refused; /status says whether to retry.
+  async function afterRefusedHandshake(refused) {
+    await fetchStatus();
+    if (socket !== refused) return; // replaced or closed meanwhile
+    if (status === null) {
+      refused.retry(); // the server is unreachable, probably restarting
+    } else if (!status.supported || !status.paired) {
+      dropSocket();
+      if (status.supported && panel.isOpen()) {
+        panel.setOpen(false);
+        dialog.open();
+      }
+    } else if (wrongOrigin() || !status.enabled || status.cli_found === false) {
+      dropSocket();
+    } else {
+      refused.retry();
     }
     render();
   }

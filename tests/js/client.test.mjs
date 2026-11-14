@@ -164,11 +164,31 @@ for (const code of [4401, 4403, 4409]) {
   });
 }
 
-test("socket reconnects with backoff after an abnormal close", () => {
+test("a socket that closes before it ever opened reports it and does not retry by itself", () => {
+  const h = harness();
+  h.sock().drop(1006);
+  assert.deepEqual(h.closes.at(-1), { code: 1006, willReconnect: false, neverOpened: true });
+  assert.equal(h.live().length, 0);
+  assert.equal(FakeWebSocket.instances.length, 1);
+});
+
+test("an opened socket that drops reports a reconnect and retries by itself", () => {
+  const h = harness();
+  h.sock().open();
+  h.sock().drop(1006);
+  assert.deepEqual(h.closes.at(-1), { code: 1006, willReconnect: true, neverOpened: false });
+  assert.equal(h.live().length, 1);
+});
+
+test("retry() after refused handshakes backs off up to the cap", () => {
   const h = harness();
   const delays = [];
   for (let i = 0; i < 7; i++) {
     h.sock().drop();
+    assert.equal(h.live().length, 0);
+    h.api.retry();
+    h.api.retry(); // a second call while one is pending schedules nothing more
+    assert.equal(h.live().length, 1);
     delays.push(h.live().at(-1).ms);
     h.fire();
   }
@@ -178,8 +198,8 @@ test("socket reconnects with backoff after an abnormal close", () => {
 
 test("backoff resets after a successful open", () => {
   const h = harness();
-  h.sock().drop(); h.fire();
-  h.sock().drop(); h.fire();
+  h.sock().drop(); h.api.retry(); h.fire();
+  h.sock().drop(); h.api.retry(); h.fire();
   h.sock().open();
   h.sock().drop();
   assert.equal(h.live().at(-1).ms, 1000);
@@ -187,11 +207,14 @@ test("backoff resets after a successful open", () => {
 
 test("close() by the page stops reconnecting and cancels a pending retry", () => {
   const h = harness();
+  h.sock().open();
   h.sock().drop();
   assert.equal(h.live().length, 1);
   h.api.close();
   assert.equal(h.live().length, 0);
   h.sock().drop();
+  assert.equal(h.live().length, 0);
+  h.api.retry();
   assert.equal(h.live().length, 0);
   assert.equal(FakeWebSocket.instances.length, 1);
 });
