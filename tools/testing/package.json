@@ -1,0 +1,13 @@
+{
+  "name": "comfyui-harness-testing",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test ../../tests/js/*.test.mjs",
+    "test:browser": "playwright test --config playwright.config.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1"
+  }
+}

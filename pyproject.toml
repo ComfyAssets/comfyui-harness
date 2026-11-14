@@ -1,0 +1,23 @@
+[project]
+name = "comfyui-harness"
+version = "0.1.0"
+description = "A drop-down terminal in the ComfyUI page for your own agent CLI."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.comfy]
+PublisherId = "kiko9"
+DisplayName = "ComfyUI Harness"
+
+[tool.black]
+line-length = 100
+extend-exclude = '/(spike|web/vendor)/'
+
+[tool.coverage.run]
+source = ["harness"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 85

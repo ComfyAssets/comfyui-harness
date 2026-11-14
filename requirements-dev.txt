@@ -1,0 +1,10 @@
+pytest
+pytest-asyncio
+pytest-aiohttp
+pytest-cov
+aiohttp
+black
+flake8
+mypy
+bandit
+pre-commit
