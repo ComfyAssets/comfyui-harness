@@ -11,9 +11,6 @@ except ImportError:
     PromptServer = None
 
 if PromptServer is not None:
-    try:  # TODO(task 6): drop this guard once harness.routes exists
-        from .harness.routes import install
-    except ImportError:
-        pass
-    else:
-        install(PromptServer.instance)
+    from .harness.routes import install
+
+    install(PromptServer.instance)

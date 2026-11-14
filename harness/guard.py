@@ -17,6 +17,8 @@ STATUS = {
     "spawn_failed": 500,
     "unsafe_permissions": 500,
     "bad_state": 500,
+    "not_found": 404,
+    "bad_request": 400,
 }
 WS_CLOSE = {"not_paired": 4401, "bad_origin": 4403, "disabled": 4409}
 
