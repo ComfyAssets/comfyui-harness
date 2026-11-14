@@ -93,10 +93,15 @@ class SessionManager:
                 lambda data: self._on_output(host, data),
                 lambda code: self._on_exit(host, code),
             )
-        except OSError as error:
+        except Exception as error:
+            # Any failure (a missing program, a waiter thread that would not start)
+            # must not leave a dead host behind for later starts to attach to.
             if self._host is host:
                 self._clear()
-            message = error.strerror or str(error)
+            if isinstance(error, OSError):
+                message = error.strerror or str(error)
+            else:
+                message = type(error).__name__
             raise Refusal("spawn_failed", message) from error
         log.info("session started: %s", cli_id)
 

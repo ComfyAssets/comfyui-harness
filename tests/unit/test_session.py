@@ -127,6 +127,19 @@ def test_spawn_oserror_becomes_spawn_failed(mgr, host):
     assert mgr.info() is None
 
 
+def test_spawn_runtime_error_becomes_spawn_failed_and_leaves_no_dead_host(mgr, host, made):
+    host.start_error = RuntimeError("can't start new thread")
+    with pytest.raises(Refusal) as e:
+        mgr.start(FakeSink(), "claude", 80, 24, False)
+    assert e.value.code == "spawn_failed"
+    assert e.value.message == "RuntimeError"
+    assert mgr.info() is None
+    host.start_error = None
+    mgr.start(FakeSink(), "claude", 80, 24, False)
+    assert len(made.calls) == 2
+    assert mgr.info() is not None
+
+
 def test_info_reports_cli_and_wall_clock_start(mgr, monkeypatch):
     monkeypatch.setattr("harness.session.time.time", lambda: 1234.5)
     assert mgr.info() is None
