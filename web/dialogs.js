@@ -12,6 +12,7 @@ export const DISCLOSURE = [
 const POLL_MS = 2000;
 const COUNTDOWN_MS = 1000;
 const REJECTED_TEXT = "That code was not accepted. Request a new one.";
+const RETRYING_TEXT = "Connection lost, retrying";
 
 export function createPairingDialog({
   document,
@@ -50,6 +51,7 @@ export function createPairingDialog({
   let countdownTimer = null;
   let remaining = 0;
   let generation = 0; // bumped on every stop so late replies are ignored
+  const connection = make("p"); // says so while polls fail on the network
 
   function stopTimers() {
     generation += 1;
@@ -86,6 +88,7 @@ export function createPairingDialog({
   }
 
   function render(pending, countdown) {
+    connection.textContent = "";
     body.replaceChildren(
       make("p", "Your code:"),
       make("code", pending.code),
@@ -94,6 +97,7 @@ export function createPairingDialog({
       commandRow("Command", pending.command),
       commandRow("Inside Docker", pending.docker_command),
       make("p", "Waiting for the code to be accepted..."),
+      connection,
     );
   }
 
@@ -108,11 +112,17 @@ export function createPairingDialog({
       state = await pollPairing(io, secret);
     } catch (error) {
       if (myGeneration !== generation) return;
+      if (error?.code === "network") {
+        // A blip (VPN, Wi-Fi): keep polling; the countdown still ends it at expiry.
+        connection.textContent = RETRYING_TEXT;
+        return;
+      }
       stopTimers();
       showMessage(error.message);
       return;
     }
     if (myGeneration !== generation) return;
+    connection.textContent = "";
     if (state === "paired") {
       stopTimers();
       closeDialog();

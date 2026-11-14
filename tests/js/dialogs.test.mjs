@@ -32,6 +32,9 @@ const fakeDocument = { createElement: (t) => new El(t), createTextNode: (t) => {
 
 const PAIR = { code: "WXYZ-1234", poll_secret: "topsecret", expires_in: 90, command: "python3 /n/pair.py WXYZ-1234", docker_command: "docker exec -it <container> python3 /n/pair.py WXYZ-1234" };
 
+const NETWORK_DOWN = Symbol("network down");
+const RETRYING = "Connection lost, retrying";
+
 function setup({ requests = [PAIR], polls = [], clipboard } = {}) {
   const log = { requests: 0, polls: [], paired: 0 };
   const intervals = [];
@@ -45,7 +48,10 @@ function setup({ requests = [PAIR], polls = [], clipboard } = {}) {
         return { ok: true, status: 200, text: async () => JSON.stringify(next) };
       }
       log.polls.push({ url, init });
-      return { ok: true, status: 200, text: async () => JSON.stringify({ state: queue.shift() ?? "waiting" }) };
+      const next = queue.shift() ?? "waiting";
+      if (next === NETWORK_DOWN) throw new TypeError("Failed to fetch");
+      if (next instanceof Error) return { ok: false, status: 400, text: async () => JSON.stringify({ error: { code: next.code, message: next.message } }) };
+      return { ok: true, status: 200, text: async () => JSON.stringify({ state: next }) };
     },
   };
   const dialog = createPairingDialog({
@@ -242,4 +248,44 @@ test("server text is never rendered through innerHTML", async () => {
   s.dialog.open();
   await s.tick(); // El.innerHTML throws on any use
   assert.ok(s.root.textContent.includes("<img onerror=x>"));
+});
+
+test("a poll lost to the network keeps polling and says so until the next answer", async () => {
+  const s = setup({ polls: [NETWORK_DOWN, NETWORK_DOWN, "waiting", "paired"] });
+  s.dialog.open();
+  await s.tick();
+  await s.poll();
+  assert.ok(s.root.textContent.includes(RETRYING));
+  assert.ok(s.root.find((e) => e.tagName === "CODE").some((e) => e.textContent === "WXYZ-1234"));
+  assert.equal(s.live().length, 2);
+  await s.poll();
+  assert.ok(s.root.textContent.includes(RETRYING));
+  await s.poll();
+  assert.equal(s.root.textContent.includes(RETRYING), false);
+  await s.poll();
+  assert.equal(s.log.paired, 1);
+  assert.equal(s.live().length, 0);
+});
+
+test("network failures stop at the code's expiry", async () => {
+  const s = setup({ requests: [{ ...PAIR, expires_in: 2 }], polls: [NETWORK_DOWN, NETWORK_DOWN, NETWORK_DOWN] });
+  s.dialog.open();
+  await s.tick();
+  await s.poll();
+  const clock = () => s.intervals.filter((i) => i.live && i.ms === 1000).at(-1);
+  clock().fn();
+  clock().fn();
+  assert.equal(s.live().length, 0);
+  assert.ok(s.root.textContent.includes("That code expired."));
+});
+
+test("a poll refused for another reason still ends pairing", async () => {
+  const refused = Object.assign(new Error("Pairing needs HTTPS."), { code: "insecure_origin" });
+  const s = setup({ polls: [refused] });
+  s.dialog.open();
+  await s.tick();
+  await s.poll();
+  assert.equal(s.live().length, 0);
+  assert.ok(s.root.textContent.includes("Pairing needs HTTPS."));
+  assert.equal(s.root.textContent.includes(RETRYING), false);
 });
