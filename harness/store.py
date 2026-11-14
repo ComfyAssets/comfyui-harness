@@ -1,11 +1,14 @@
 """Data directory, machine key and persisted state. The bottom layer."""
 
+import errno
 import json
 import os
 import secrets
+import stat
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator, TypeVar
 
 SCHEMA = 1
 KEY_BYTES = 32
@@ -13,6 +16,11 @@ INSTANCE_ID_BYTES = 4
 DIR_MODE = 0o700
 FILE_MODE = 0o600
 OTHERS_MASK = 0o077
+MAX_STATE_BYTES = 1024 * 1024
+LOAD_ATTEMPTS = 3
+_SYMLINK_ERRNOS = (errno.ELOOP, errno.ENOTDIR, errno.EMLINK)
+
+T = TypeVar("T")
 
 
 class StoreError(Exception):
@@ -91,19 +99,39 @@ def _parse_state(raw: Any) -> State:
     )
 
 
-def _check_private(path: Path, what: str) -> None:
-    if path.stat().st_mode & OTHERS_MASK:
+def _reject_constant(name: str) -> Any:
+    raise ValueError("non-finite number")
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError(errno.EIO, "short write made no progress")
+        view = view[written:]
+
+
+def _read_limited(fd: int, limit: int) -> bytes:
+    """Read up to limit+1 bytes so callers can detect an oversize file."""
+    chunks: list[bytes] = []
+    total = 0
+    while total <= limit:
+        chunk = os.read(fd, limit + 1 - total)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
+def _check_owner_only(path: Path, st: os.stat_result, what: str) -> None:
+    if st.st_uid != os.geteuid():
+        raise StoreError("unsafe_permissions", path, f"{what} {path} has another owner")
+    if st.st_mode & OTHERS_MASK:
         raise StoreError(
             "unsafe_permissions", path, f"{what} {path} is accessible by other accounts"
         )
-
-
-def _fsync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 class Store:
@@ -130,67 +158,142 @@ class Store:
         return self._state
 
     def open(self) -> None:
-        self._open_directory()
-        self._key = self._load_key()
-        self._state = self._load_state()
+        with self._directory(create=True) as dir_fd:
+            self._key = self._load(dir_fd, self.key_path, self._parse_key, self._new_key)
+            self._state = self._load(
+                dir_fd, self.state_path, self._parse_state_bytes, self._new_state
+            )
 
     def update(self, change: Callable[[State], State]) -> State:
         new_state = change(self.state)
-        self._write_state(new_state)
+        with self._directory(create=False) as dir_fd:
+            self._atomic_write(dir_fd, self.state_path.name, self._encode(new_state))
         self._state = new_state
         return new_state
 
-    def _open_directory(self) -> None:
-        if not self.data_dir.exists():
-            self.data_dir.mkdir(mode=DIR_MODE, parents=True)
-            self.data_dir.chmod(DIR_MODE)  # mkdir honours the umask; this does not
-        _check_private(self.data_dir, "data directory")
-
-    def _load_key(self) -> bytes:
-        if not self.key_path.exists():
-            self._create_file(self.key_path, secrets.token_bytes(KEY_BYTES))
-        _check_private(self.key_path, "key file")
-        return self.key_path.read_bytes()
-
-    def _load_state(self) -> State:
-        if not self.state_path.exists():
-            fresh = State(
-                schema=SCHEMA,
-                instance_id=secrets.token_hex(INSTANCE_ID_BYTES),
-                enabled=False,
-                browsers=(),
-            )
-            self._write_state(fresh)
-            return fresh
-        _check_private(self.state_path, "state file")
+    @contextmanager
+    def _directory(self, create: bool) -> Iterator[int]:
+        """Yield an fd for the data directory, checked to be ours and private."""
+        created = False
+        if create:
+            self.data_dir.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.mkdir(self.data_dir, DIR_MODE)
+                created = True
+            except FileExistsError:
+                pass
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
         try:
-            return _parse_state(json.loads(self.state_path.read_text("utf-8")))
-        except (ValueError, OSError) as exc:  # JSON and UTF-8 errors are ValueErrors
-            raise StoreError(
-                "bad_state", self.state_path, f"state file is unusable: {exc}"
-            ) from exc
-
-    def _create_file(self, path: Path, data: bytes) -> None:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FILE_MODE)
+            fd = os.open(self.data_dir, flags)
+        except OSError as exc:
+            if exc.errno in _SYMLINK_ERRNOS:
+                raise StoreError(
+                    "unsafe_permissions",
+                    self.data_dir,
+                    f"data directory {self.data_dir} is not a plain directory",
+                ) from exc
+            raise
         try:
-            os.write(fd, data)
-            os.fsync(fd)
+            if created:
+                os.fchmod(fd, DIR_MODE)  # mkdir honours the umask; this does not
+            _check_owner_only(self.data_dir, os.fstat(fd), "data directory")
+            yield fd
         finally:
             os.close(fd)
-        _fsync_dir(self.data_dir)
 
-    def _write_state(self, state: State) -> None:
-        payload = json.dumps(asdict(state), indent=2).encode("utf-8")
-        tmp = self.state_path.with_name(f"state.json.{secrets.token_hex(4)}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FILE_MODE)
+    def _load(
+        self,
+        dir_fd: int,
+        path: Path,
+        parse: Callable[[Path, bytes], T],
+        make: Callable[[int, Path], T],
+    ) -> T:
+        for _ in range(LOAD_ATTEMPTS):
+            data = self._read_private(dir_fd, path)
+            if data is not None:
+                return parse(path, data)
+            try:
+                return make(dir_fd, path)
+            except FileExistsError:
+                continue  # someone else created it first: re-run the checks
+        raise StoreError("bad_state", path, f"{path.name} keeps changing while opening")
+
+    def _read_private(self, dir_fd: int, path: Path) -> bytes | None:
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        try:
+            fd = os.open(path.name, flags, dir_fd=dir_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if exc.errno in _SYMLINK_ERRNOS:
+                raise StoreError("unsafe_permissions", path, f"{path} is a symbolic link") from exc
+            raise
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise StoreError("unsafe_permissions", path, f"{path} is not a regular file")
+            _check_owner_only(path, st, "file")
+            return _read_limited(fd, MAX_STATE_BYTES)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _parse_key(path: Path, data: bytes) -> bytes:
+        if len(data) != KEY_BYTES:
+            raise StoreError("bad_state", path, f"key file {path} has the wrong length")
+        return data
+
+    @staticmethod
+    def _parse_state_bytes(path: Path, data: bytes) -> State:
+        try:
+            if len(data) > MAX_STATE_BYTES:
+                raise ValueError("too large")
+            raw = json.loads(data.decode("utf-8"), parse_constant=_reject_constant)
+            return _parse_state(raw)
+        except (ValueError, OverflowError, RecursionError) as exc:
+            # Fixed text: never echo file contents into messages or logs.
+            raise StoreError("bad_state", path, "state file is not valid") from exc
+
+    def _new_key(self, dir_fd: int, path: Path) -> bytes:
+        key = secrets.token_bytes(KEY_BYTES)
+        self._atomic_write(dir_fd, path.name, key, exclusive=True)
+        return key
+
+    def _new_state(self, dir_fd: int, path: Path) -> State:
+        fresh = State(
+            schema=SCHEMA,
+            instance_id=secrets.token_hex(INSTANCE_ID_BYTES),
+            enabled=False,
+            browsers=(),
+        )
+        self._atomic_write(dir_fd, path.name, self._encode(fresh), exclusive=True)
+        return fresh
+
+    @staticmethod
+    def _encode(state: State) -> bytes:
+        return json.dumps(asdict(state), indent=2).encode("utf-8")
+
+    @staticmethod
+    def _atomic_write(dir_fd: int, name: str, data: bytes, exclusive: bool = False) -> None:
+        """Temp file, fsync, then rename (or link, if `name` must not exist yet)."""
+        tmp = f".{name}.{secrets.token_hex(4)}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        fd = os.open(tmp, flags, FILE_MODE, dir_fd=dir_fd)
         try:
             try:
-                os.write(fd, payload)
+                _write_all(fd, data)
                 os.fsync(fd)
             finally:
                 os.close(fd)
-            os.replace(tmp, self.state_path)
+            if exclusive:
+                os.link(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                os.unlink(tmp, dir_fd=dir_fd)
+            else:
+                os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         except BaseException:
-            tmp.unlink(missing_ok=True)
+            try:
+                os.unlink(tmp, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
             raise
-        _fsync_dir(self.data_dir)
+        os.fsync(dir_fd)

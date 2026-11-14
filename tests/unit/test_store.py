@@ -185,3 +185,135 @@ def test_pair_file_mode_is_not_checked(tmp_path):
     pair.write_text("x")
     pair.chmod(0o644)
     Store(tmp_path).open()
+
+
+@pytest.mark.parametrize("size", [0, 31, 33])
+def test_key_of_wrong_length_is_bad_state(tmp_path, size):
+    opened(tmp_path)
+    (tmp_path / "key").write_bytes(b"k" * size)
+    with pytest.raises(StoreError) as e:
+        Store(tmp_path).open()
+    assert e.value.code == "bad_state" and e.value.path.name == "key"
+
+
+def test_short_writes_are_retried_to_completion(tmp_path, monkeypatch):
+    real_write = os.write
+    monkeypatch.setattr(os, "write", lambda fd, data: real_write(fd, bytes(data)[:3]))
+    s = opened(tmp_path)
+    s.update(lambda st: dataclasses.replace(st, enabled=True))
+    monkeypatch.undo()
+    again = opened(tmp_path)
+    assert len(again.key) == 32 and again.key == s.key
+    assert again.state.enabled is True
+
+
+def test_write_that_makes_no_progress_fails(tmp_path, monkeypatch):
+    s = opened(tmp_path)
+    monkeypatch.setattr(os, "write", lambda fd, data: 0)
+    with pytest.raises(OSError):
+        s.update(lambda st: dataclasses.replace(st, enabled=True))
+    assert s.state.enabled is False
+
+
+def test_half_written_key_is_never_visible_under_its_name(tmp_path, monkeypatch):
+    def boom(fd, data):
+        raise OSError("crash")
+
+    monkeypatch.setattr(os, "write", boom)
+    with pytest.raises(OSError):
+        Store(tmp_path).open()
+    assert not (tmp_path / "key").exists()
+
+
+def test_data_dir_symlink_is_refused(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    with pytest.raises(StoreError) as e:
+        Store(link).open()
+    assert e.value.code == "unsafe_permissions"
+
+
+def test_data_dir_that_is_a_file_is_refused(tmp_path):
+    f = tmp_path / "file"
+    f.write_text("x")
+    with pytest.raises(StoreError) as e:
+        Store(f).open()
+    assert e.value.code == "unsafe_permissions"
+
+
+@pytest.mark.parametrize("name", ["key", "state.json"])
+def test_symlinked_file_is_refused(tmp_path, name):
+    opened(tmp_path)
+    target = tmp_path.parent / f"{tmp_path.name}-target"
+    target.write_bytes((tmp_path / name).read_bytes())
+    target.chmod(0o600)
+    (tmp_path / name).unlink()
+    (tmp_path / name).symlink_to(target)
+    with pytest.raises(StoreError) as e:
+        Store(tmp_path).open()
+    assert e.value.code == "unsafe_permissions" and e.value.path.name == name
+
+
+def test_state_that_is_a_fifo_is_refused_without_blocking(tmp_path):
+    opened(tmp_path)
+    (tmp_path / "state.json").unlink()
+    os.mkfifo(tmp_path / "state.json", 0o600)
+    with pytest.raises(StoreError) as e:
+        Store(tmp_path).open()
+    assert e.value.code == "unsafe_permissions"
+
+
+def test_state_that_is_a_directory_is_refused(tmp_path):
+    opened(tmp_path)
+    (tmp_path / "state.json").unlink()
+    (tmp_path / "state.json").mkdir(mode=0o700)
+    with pytest.raises(StoreError) as e:
+        Store(tmp_path).open()
+    assert e.value.code == "unsafe_permissions"
+
+
+def test_files_owned_by_someone_else_are_refused(tmp_path, monkeypatch):
+    opened(tmp_path)
+    monkeypatch.setattr(os, "geteuid", lambda: os.stat(tmp_path).st_uid + 1)
+    with pytest.raises(StoreError) as e:
+        Store(tmp_path).open()
+    assert e.value.code == "unsafe_permissions" and e.value.path == tmp_path
+
+
+def test_state_over_the_size_cap_is_bad_state(tmp_path):
+    opened(tmp_path)
+    (tmp_path / "state.json").write_text(" " * (1024 * 1024 + 1))
+    with pytest.raises(StoreError) as e:
+        Store(tmp_path).open()
+    assert e.value.code == "bad_state"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"schema": 1, "instance_id": "a", "enabled": true, "browsers": [{"id": "x", '
+        '"token_sha256": "t", "origin": "o", "label": "l", "created": 1'
+        + "0" * 400
+        + ', "last_seen": 0, "acknowledged": 0}]}',
+        "[" * 10_000 + "]" * 10_000,
+        '{"schema": 1, "instance_id": "a", "enabled": true, "browsers": [], "x": NaN}',
+        '{"schema": 1, "instance_id": "a", "enabled": true, "browsers": [Infinity]}',
+    ],
+    ids=["huge-number", "deep-nesting", "nan", "infinity"],
+)
+def test_pathological_state_is_bad_state(tmp_path, content):
+    opened(tmp_path)
+    (tmp_path / "state.json").write_text(content)
+    with pytest.raises(StoreError) as e:
+        Store(tmp_path).open()
+    assert e.value.code == "bad_state"
+
+
+def test_bad_state_message_does_not_echo_file_bytes(tmp_path):
+    opened(tmp_path)
+    (tmp_path / "state.json").write_bytes(b"\xfesecret")
+    with pytest.raises(StoreError) as e:
+        Store(tmp_path).open()
+    assert "secret" not in str(e.value) and "\\xfe" not in str(e.value)
