@@ -180,3 +180,27 @@ test("a notice shows text and a button that runs its callback", () => {
   assert.equal(revoked, 1);
   assert.equal(buttons(p.element).some((b) => b.textContent === "Revoke"), false, "notice clears after acting");
 });
+
+// Found in Chromium: a visibility transition keeps the panel hidden for the first
+// frame, so focus() on open fails and the first keys go elsewhere.
+test("opening shows the panel at once so focus can move into it; closing hides it after the slide", () => {
+  const p = createPanel(fakeEnv());
+  p.setOpen(true);
+  assert.match(p.element.style.transition, /transform 150ms/);
+  assert.match(p.element.style.transition, /visibility 0s(?! \d)/);
+  p.setOpen(false);
+  assert.match(p.element.style.transition, /visibility 0s linear 150ms/);
+});
+
+// Found in Chromium: closing with the header button left focus on that button
+// inside the hidden panel, which swallows every key afterwards.
+test("closing never leaves focus inside the hidden panel", () => {
+  const env = fakeEnv();
+  const p = createPanel(env);
+  env.document.body.appendChild(p.element);
+  p.setOpen(true); // opened while nothing outside the panel had focus
+  const closeButton = buttons(p.element).find((b) => b.getAttribute("aria-label") === "Close terminal");
+  closeButton.focus();
+  p.setOpen(false);
+  assert.equal(p.element.contains(env.document.activeElement), false);
+});

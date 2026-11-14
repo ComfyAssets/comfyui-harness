@@ -59,6 +59,8 @@ export function fakeDocument() {
   doc.createElement = (t) => new El(t, doc);
   doc.createTextNode = (t) => { const e = new El("#text", doc); e._text = String(t); return e; };
   doc.body = new El("body", doc);
+  // As in browsers, focusing a body without tabindex does not move focus.
+  doc.body.focus = () => { doc.body.focused++; };
   doc.activeElement = doc.body;
   return doc;
 }

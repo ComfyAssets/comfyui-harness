@@ -4,7 +4,10 @@ import { IDS, clamp } from "./settings.js";
 
 export const STOPPED_EVENTS = ["keydown", "keyup", "keypress", "paste", "copy", "cut", "wheel", "pointerdown", "mousedown", "contextmenu"];
 
-const SLIDE = "transform 150ms ease, visibility 150ms";
+// Visible at once on open, so focus can move in on the same frame; hidden only
+// once the slide out has finished.
+const SLIDE_IN = "transform 150ms ease, visibility 0s";
+const SLIDE_OUT = "transform 150ms ease, visibility 0s linear 150ms";
 const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
 const Z_INDEX = "10000";
 
@@ -78,7 +81,7 @@ export function createPanel({ document, matchMedia = () => ({ matches: false }),
     background: "#101018", color: "#d0d4e0", borderBottom: "1px solid #303040",
     fontFamily: "system-ui, sans-serif", fontSize: "13px",
     transform: "translateY(-100%)", visibility: "hidden",
-    transition: reduced() ? "none" : SLIDE,
+    transition: reduced() ? "none" : SLIDE_OUT,
   });
 
   const header = make("div");
@@ -115,7 +118,7 @@ export function createPanel({ document, matchMedia = () => ({ matches: false }),
 
   function setOpen(value) {
     const next = Boolean(value);
-    element.style.transition = reduced() ? "none" : SLIDE;
+    element.style.transition = reduced() ? "none" : next ? SLIDE_IN : SLIDE_OUT;
     if (next === open) return;
     open = next;
     if (open) {
@@ -130,6 +133,9 @@ export function createPanel({ document, matchMedia = () => ({ matches: false }),
     const target = returnFocus;
     returnFocus = null;
     if (target && typeof target.focus === "function" && target.isConnected !== false) target.focus();
+    // Focus left in the hidden panel would swallow every key; let it fall to the page.
+    const active = document.activeElement;
+    if (active && element.contains(active) && typeof active.blur === "function") active.blur();
   }
 
   function show(view) {
