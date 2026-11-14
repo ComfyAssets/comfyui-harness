@@ -140,6 +140,19 @@ def test_spawn_runtime_error_becomes_spawn_failed_and_leaves_no_dead_host(mgr, h
     assert mgr.info() is not None
 
 
+def test_unwritable_mcp_file_becomes_spawn_failed(mgr, made, monkeypatch):
+    def unwritable(path, url):
+        raise IsADirectoryError(21, "Is a directory", str(path))
+
+    monkeypatch.setattr(cli_mod, "write_mcp_file", unwritable)
+    with pytest.raises(Refusal) as e:
+        mgr.start(FakeSink(), "claude", 80, 24, False)
+    assert e.value.code == "spawn_failed"
+    assert "Is a directory" in e.value.message
+    assert mgr.info() is None
+    assert made.calls == []
+
+
 def test_info_reports_cli_and_wall_clock_start(mgr, monkeypatch):
     monkeypatch.setattr("harness.session.time.time", lambda: 1234.5)
     assert mgr.info() is None

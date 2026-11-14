@@ -70,7 +70,11 @@ class SessionManager:
             return
         exe = self._find(cli_id)
         cli = cli_mod.CLIS[cli_id]
-        wrote = cli_mod.write_mcp_file(self._store.mcp_path, self._comfy_url())
+        try:
+            wrote = cli_mod.write_mcp_file(self._store.mcp_path, self._comfy_url())
+        except OSError as error:
+            reason = error.strerror or type(error).__name__
+            raise Refusal("spawn_failed", f"Could not write the MCP config: {reason}") from error
         mcp = self._store.mcp_path if wrote else None
         argv = cli_mod.build_argv(cli, exe, mcp, resume)
         env = cli_mod.build_env(os.environ)

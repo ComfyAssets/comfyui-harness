@@ -15,6 +15,8 @@ from harness.session import SessionManager
 
 from conftest import ORIGIN, PREFIXES, FakeHost, pair
 
+real_write_mcp_file = cli_mod.write_mcp_file
+
 pytestmark = pytest.mark.usefixtures("harness_logs")
 
 CWD = Path("/work/dir")
@@ -234,6 +236,19 @@ async def test_spawn_failure_is_an_error_message(client, deps, host):
     ws, _ = await paired_ws(client, deps)
     reply = await start(ws)
     assert reply["code"] == "spawn_failed"
+    assert not ws.closed
+    await ws.close()
+
+
+async def test_unwritable_mcp_file_is_an_error_message_not_a_dropped_socket(
+    client, deps, store, monkeypatch
+):
+    store.mcp_path.mkdir()  # mcp.json is a directory
+    monkeypatch.setattr(cli_mod, "write_mcp_file", real_write_mcp_file)
+    monkeypatch.setattr(cli_mod, "find_mcp_server", lambda *a, **k: Path("/b/comfy-mcp"))
+    ws, _ = await paired_ws(client, deps)
+    reply = await start(ws)
+    assert reply["type"] == "error" and reply["code"] == "spawn_failed"
     assert not ws.closed
     await ws.close()
 
