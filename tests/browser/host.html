@@ -7,7 +7,8 @@
     html, body { margin: 0; height: 100%; background: #202020; color: #ddd; font-family: sans-serif; }
     #graph-canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; background: #2a2a2a; }
     #prompt { position: fixed; right: 16px; bottom: 16px; width: 240px; height: 60px; }
-    #settings { position: fixed; left: 16px; bottom: 16px; max-width: 60vw; background: #303030; }
+    /* Kept below the dropped panel (50vh by default), scrolling when the rows are taller. */
+    #settings { position: fixed; left: 16px; bottom: 16px; max-width: 60vw; max-height: 44vh; overflow-y: auto; background: #303030; }
   </style>
   <script>
     // Lets the harness expose its terminal so tests can read the screen.

@@ -256,7 +256,7 @@ test("switching the terminal off ends the session", async ({ page }) => {
   await openPaired(page, dataDir());
   await log.waitFor(/^READY /, mark);
   await page.evaluate(() => window.__showServerRows());
-  const toggle = page.getByRole("switch");
+  const toggle = page.getByRole("switch", { name: "Terminal enabled" });
   await expect(toggle).toBeChecked();
   await toggle.uncheck();
 

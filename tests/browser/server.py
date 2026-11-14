@@ -18,6 +18,7 @@ import stat
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 from aiohttp import web
 
@@ -27,7 +28,13 @@ sys.path.insert(0, str(REPO))
 
 from harness import cli  # noqa: E402
 from harness.pairing import Pairing  # noqa: E402
-from harness.routes import Deps, _session_manager, setup, watch_app  # noqa: E402
+from harness.routes import (  # noqa: E402
+    Deps,
+    _build_bridge,
+    _session_manager,
+    setup,
+    watch_app,
+)
 from harness.store import Store  # noqa: E402
 
 HOST = "127.0.0.1"
@@ -59,7 +66,18 @@ def build_app(root: Path, port: int) -> tuple[web.Application, Path]:
     )
     work = root / "work"
     work.mkdir()
-    deps.sessions = _session_manager(store, work, deps.comfy_url)
+    # Built the way install() builds it; ComfyUI's folder_paths is stood in for by
+    # three scratch directories.
+    folders = {name: root / "comfy" / name for name in ("output", "temp", "input")}
+    for folder in folders.values():
+        folder.mkdir(parents=True)
+    folder_paths = SimpleNamespace(
+        get_output_directory=lambda: str(folders["output"]),
+        get_temp_directory=lambda: str(folders["temp"]),
+        get_input_directory=lambda: str(folders["input"]),
+    )
+    deps.bridge = _build_bridge(deps, store, folder_paths)
+    deps.sessions = _session_manager(store, work, deps.comfy_url, deps.bridge)
     app = web.Application()
     routes = web.RouteTableDef()
     setup(routes, deps)
