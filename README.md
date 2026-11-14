@@ -30,11 +30,11 @@ Every browser pairs, including one on the same machine.
 2. After you tick it, the popup shows a code like `K7QM-3XVD` and a command.
 3. Run that command on the machine that runs ComfyUI, for example over SSH:
    ```
-   python /path/to/ComfyUI/custom_nodes/comfyui-harness/pair.py K7QM-3XVD
+   python3 /path/to/ComfyUI/custom_nodes/comfyui-harness/pair.py K7QM-3XVD
    ```
    In Docker:
    ```
-   docker exec -it <container> python /path/to/custom_nodes/comfyui-harness/pair.py K7QM-3XVD
+   docker exec -it <container> python3 /path/to/custom_nodes/comfyui-harness/pair.py K7QM-3XVD
    ```
    The popup shows both forms. `pair.py` uses only the standard library, writes one file in `user/__harness` and starts nothing. If the data directory is not the default, the command includes `--data-dir`.
 4. The popup closes and the terminal opens. The first pairing also turns the terminal on.

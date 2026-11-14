@@ -1,6 +1,6 @@
 """Approve a browser: sign the code it shows with the machine key.
 
-Run on the machine ComfyUI runs on, as: python pair.py K7QM-3XVD
+Run on the machine ComfyUI runs on, as: python3 pair.py K7QM-3XVD
 Standard library only, so it works outside ComfyUI's environment.
 """
 

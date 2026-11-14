@@ -70,8 +70,8 @@ async def test_pair_request_returns_code_secret_and_commands(client, deps):
     r = await client.post("/harness/pair/request", headers={"Origin": ORIGIN})
     body = await r.json()
     assert set(body) == {"code", "poll_secret", "expires_in", "command", "docker_command"}
-    assert body["command"].startswith(f"python {deps.node_dir}/pair.py {body['code']}")
-    assert body["docker_command"] == "docker exec <container> " + body["command"]
+    assert body["command"].startswith(f"python3 {deps.node_dir}/pair.py {body['code']}")
+    assert body["docker_command"] == "docker exec -it <container> " + body["command"]
 
 
 async def test_pair_request_names_a_custom_data_dir(client, deps):
@@ -89,7 +89,7 @@ async def test_pair_request_omits_data_dir_when_it_is_the_default(
     deps.pairing = type(deps.pairing)(store, deps.clock)
     client = await make_client(aiohttp_client, deps)
     body = await (await client.post("/harness/pair/request", headers={"Origin": ORIGIN})).json()
-    assert body["command"] == f"python {node_dir}/pair.py {body['code']}"
+    assert body["command"] == f"python3 {node_dir}/pair.py {body['code']}"
 
 
 async def test_unsupported_platform_refuses_pair_request(aiohttp_client, deps):

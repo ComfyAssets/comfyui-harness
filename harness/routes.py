@@ -103,7 +103,7 @@ def _require_secure(request: web.Request) -> str:
 
 
 def _pair_command(deps: Deps, store: Store, code: str) -> str:
-    command = f"python {shlex.quote(str(deps.node_dir))}/pair.py {code}"
+    command = f"python3 {shlex.quote(str(deps.node_dir))}/pair.py {code}"
     default = deps.node_dir.absolute().parents[1] / "user" / DEFAULT_DATA_DIR_NAME
     if store.data_dir != default:
         command += f" --data-dir {shlex.quote(str(store.data_dir))}"
@@ -189,7 +189,7 @@ def setup(routes: web.RouteTableDef, deps: Deps, prefix: str = "/harness") -> No
                 "poll_secret": pending.poll_secret,
                 "expires_in": pending.expires_in,
                 "command": command,
-                "docker_command": "docker exec <container> " + command,
+                "docker_command": "docker exec -it <container> " + command,
             }
         )
 

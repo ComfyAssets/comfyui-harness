@@ -52,7 +52,7 @@ test("first key press shows the disclosure, and the code only after acknowledgin
   await dialog.getByRole("checkbox").check();
   await expect(dialog.locator("code").first()).toHaveText(/^[0-9A-Z]{4}-[0-9A-Z]{4}$/);
   await expect(dialog).toContainText(`--data-dir ${dataDir()}`);
-  await expect(dialog).toContainText("docker exec <container>");
+  await expect(dialog).toContainText("docker exec -it <container> python3 ");
 });
 
 test("pairing through pair.py closes the popup and opens the terminal", async ({ page }) => {

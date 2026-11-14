@@ -30,7 +30,7 @@ class El {
 }
 const fakeDocument = { createElement: (t) => new El(t), createTextNode: (t) => { const e = new El("#text"); e._text = t; return e; } };
 
-const PAIR = { code: "WXYZ-1234", poll_secret: "topsecret", expires_in: 90, command: "python /n/pair.py WXYZ-1234", docker_command: "docker exec <container> python /n/pair.py WXYZ-1234" };
+const PAIR = { code: "WXYZ-1234", poll_secret: "topsecret", expires_in: 90, command: "python3 /n/pair.py WXYZ-1234", docker_command: "docker exec -it <container> python3 /n/pair.py WXYZ-1234" };
 
 function setup({ requests = [PAIR], polls = [], clipboard } = {}) {
   const log = { requests: 0, polls: [], paired: 0 };
