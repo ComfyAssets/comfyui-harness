@@ -263,6 +263,15 @@ def _session_manager(store: Store, cwd: Path, comfy_port: Callable[[], int]) -> 
     )
 
 
+def watch_app(app: web.Application, deps: Deps) -> None:
+    """End the terminal's background work when the server shuts down."""
+
+    async def on_shutdown(_app: web.Application) -> None:
+        await _terminal(deps).shutdown()
+
+    app.on_shutdown.append(on_shutdown)
+
+
 def install(prompt_server: Any) -> Deps:
     """Open the store and register the routes. ComfyUI mirrors them under /api itself."""
     import folder_paths  # type: ignore[import-not-found]  # only inside ComfyUI
@@ -292,4 +301,5 @@ def install(prompt_server: Any) -> Deps:
     if supported and store is not None:
         deps.sessions = _session_manager(store, Path(folder_paths.base_path), deps.comfy_port)
     setup(prompt_server.routes, deps)
+    watch_app(prompt_server.app, deps)
     return deps

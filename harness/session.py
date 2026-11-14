@@ -19,6 +19,7 @@ DETACHED_LIMIT_SECONDS = 43200
 TICK_SECONDS = 30
 HIGH_WATER = 1 << 20
 BOOT_BYTES = 8
+MAX_SHOWN_ID = 32
 
 log = logging.getLogger("harness")
 
@@ -58,6 +59,10 @@ class SessionManager:
         if self._host is None:
             return None
         return {"cli": self._cli_id, "started": self._started}
+
+    def holds(self, sink: Sink) -> bool:
+        """True if a session runs and this sink is the one attached to it."""
+        return self._host is not None and sink is self._sink
 
     def start(self, sink: Sink, cli_id: str, cols: int, rows: int, resume: bool) -> None:
         if self._host is not None:
@@ -145,7 +150,8 @@ class SessionManager:
         try:
             return cli_mod.find(cli_id)
         except KeyError as error:
-            raise Refusal("cli_not_found", f"Unknown CLI: {cli_id}") from error
+            shown = cli_id[:MAX_SHOWN_ID]
+            raise Refusal("cli_not_found", f"Unknown CLI: {shown}") from error
         except cli_mod.CliNotFound as error:
             raise Refusal("cli_not_found", str(error)) from error
 

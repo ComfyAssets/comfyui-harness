@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 import types
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from aiohttp import WSMsgType
 
 from harness import cli as cli_mod
 from harness import terminal
+from harness.pairing import COOKIE_IDLE, COOKIE_MAX
 from harness.session import SessionManager
 
 from conftest import ORIGIN, PREFIXES, FakeHost, pair
@@ -39,12 +41,40 @@ def host():
     return FakeHost()
 
 
+@pytest.fixture
+def made():
+    return []
+
+
 @pytest.fixture(autouse=True)
-def sessions(deps, host, store, monkeypatch):
+def sessions(deps, host, store, made, monkeypatch):
     monkeypatch.setattr(cli_mod, "find", fake_find)
     monkeypatch.setattr(cli_mod, "write_mcp_file", lambda path, port: False)
-    deps.sessions = SessionManager(lambda: host, store, CWD, lambda: 8188)
+
+    def factory():
+        made.append(host)
+        return host
+
+    deps.sessions = SessionManager(factory, store, CWD, lambda: 8188)
     return deps.sessions
+
+
+SLOW_KILL = 0.5
+
+
+@pytest.fixture
+def slow_kill(host):
+    """Make kill() take a while, like the real host, so the windows are real."""
+    host.kill_started = asyncio.Event()
+
+    async def kill():
+        host.killed += 1
+        host.running = False
+        host.kill_started.set()
+        await asyncio.sleep(SLOW_KILL)
+
+    host.kill = kill
+    return host
 
 
 async def eventually(condition, timeout=WAIT):
@@ -568,6 +598,7 @@ class FakePromptServer:
         from aiohttp import web
 
         self.routes = web.RouteTableDef()
+        self.app = web.Application()
         self.port = 8188
 
 
@@ -627,3 +658,198 @@ async def test_install_with_a_broken_store_has_no_sessions(monkeypatch, tmp_path
     fake_folder_paths(monkeypatch, data, tmp_path)
     deps = install(FakePromptServer())
     assert deps.sessions is None
+
+
+# --- fix round 1: races around revoke, disable and the upgrade -------------------------
+
+
+async def test_revoked_socket_cannot_start_while_the_session_is_being_killed(
+    client, deps, host, sessions, made, slow_kill
+):
+    ws, headers = await paired_ws(client, deps)
+    await start(ws)
+    revoke = asyncio.ensure_future(
+        client.delete(f"/harness/pair/browsers/{browser_id(deps)}", headers=headers)
+    )
+    await asyncio.wait_for(host.kill_started.wait(), WAIT)
+    await ws.send_json({"type": "start", "cli": "claude", "cols": 80, "rows": 24, "resume": False})
+    await ws.send_bytes(b"typed by a revoked page")
+    assert (await revoke).status == 204
+    code, seen = await until_close(ws)
+    assert code == 4401
+    assert {"type": "started"} not in seen
+    assert len(made) == 1
+    assert host.written == b""
+    assert sessions.info() is None
+
+
+async def test_disable_during_a_slow_kill_ignores_start_from_another_socket(
+    client, deps, host, sessions, made, slow_kill
+):
+    first, headers = await paired_ws(client, deps)
+    await start(first)
+    second, _ = await connect(client, headers)
+    disable = asyncio.ensure_future(
+        client.put("/harness/enabled", json={"enabled": False}, headers=headers)
+    )
+    await asyncio.wait_for(host.kill_started.wait(), WAIT)
+    await second.send_json(
+        {"type": "start", "cli": "claude", "cols": 80, "rows": 24, "resume": False}
+    )
+    assert (await disable).status == 204
+    code, seen = await until_close(second)
+    assert code == 4409
+    assert {"type": "started"} not in seen
+    assert len(made) == 1
+    assert sessions.info() is None
+    await until_close(first)
+
+
+@pytest.mark.parametrize("kind", ["start", "attach"])
+async def test_start_or_attach_while_disabled_is_refused(client, deps, made, kind):
+    ws, _ = await paired_ws(client, deps)
+    deps.store.update(lambda state: replace(state, enabled=False))
+    message = {"type": kind, "cli": "claude", "cols": 80, "rows": 24, "resume": False}
+    await ws.send_json(message)
+    reply = await ws.receive_json(timeout=WAIT)
+    assert reply["type"] == "error" and reply["code"] == "disabled"
+    assert made == []
+    await ws.close()
+
+
+async def test_frames_from_a_browser_no_longer_paired_are_refused(client, deps, host, made):
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    gone = browser_id(deps)
+    deps.store.update(
+        lambda state: replace(state, browsers=tuple(b for b in state.browsers if b.id != gone))
+    )
+    await ws.send_bytes(b"typed after revoke")
+    await ws.send_json({"type": "resize", "cols": 99, "rows": 33})
+    code, _ = await until_close(ws)
+    assert code == 4401
+    assert host.written == b"" and host.size == (80, 24)
+    assert len(made) == 1
+
+
+@pytest.fixture
+def gated_prepare(monkeypatch):
+    gate = asyncio.Event()
+    original = terminal.web.WebSocketResponse.prepare
+
+    async def prepare(self, request):
+        await gate.wait()
+        return await original(self, request)
+
+    monkeypatch.setattr(terminal.web.WebSocketResponse, "prepare", prepare)
+    return gate
+
+
+async def test_revoke_during_the_upgrade_closes_the_new_socket(client, deps, gated_prepare):
+    headers, _ = await pair(client, deps)
+    other, _ = await pair(client, deps)
+    connecting = asyncio.ensure_future(client.ws_connect("/harness" + WS_PATH, headers=headers))
+    await asyncio.sleep(0.05)
+    r = await client.delete(f"/harness/pair/browsers/{browser_id(deps)}", headers=other)
+    assert r.status == 204
+    gated_prepare.set()
+    ws = await connecting
+    code, seen = await until_close(ws)
+    assert code == 4401
+    assert not any(m.get("type") == "hello" for m in seen)
+
+
+async def test_disable_during_the_upgrade_closes_the_new_socket(client, deps, gated_prepare):
+    headers, _ = await pair(client, deps)
+    connecting = asyncio.ensure_future(client.ws_connect("/harness" + WS_PATH, headers=headers))
+    await asyncio.sleep(0.05)
+    r = await client.put("/harness/enabled", json={"enabled": False}, headers=headers)
+    assert r.status == 204
+    gated_prepare.set()
+    ws = await connecting
+    code, _ = await until_close(ws)
+    assert code == 4409
+
+
+async def test_tick_closes_sockets_whose_cookie_has_aged_out(client, deps, clock, monkeypatch):
+    monkeypatch.setattr(terminal, "TICK_SECONDS", 0.01)
+    ws, _ = await paired_ws(client, deps)
+    await nothing_arrives(ws)
+    clock.advance(COOKIE_IDLE + 1)
+    code, _ = await until_close(ws)
+    assert code == 4401
+
+
+async def test_tick_closes_sockets_past_the_cookie_maximum(client, deps, clock, monkeypatch):
+    monkeypatch.setattr(terminal, "TICK_SECONDS", 0.01)
+    ws, _ = await paired_ws(client, deps)
+    newest = deps.store.state.browsers[0]
+    old = replace(newest, created=clock.now - COOKIE_MAX - 1)
+    deps.store.update(lambda state: replace(state, browsers=(old,)))
+    code, _ = await until_close(ws)
+    assert code == 4401
+
+
+async def test_a_page_that_is_not_attached_cannot_stop_the_session(client, deps, host, sessions):
+    first, headers = await paired_ws(client, deps)
+    await start(first)
+    second, _ = await connect(client, headers)
+    await second.send_json({"type": "attach", "cols": 80, "rows": 24})
+    await first.receive_json(timeout=WAIT)  # detached / taken_over
+    await first.send_json({"type": "stop"})
+    reply = await first.receive_json(timeout=WAIT)
+    assert reply["type"] == "error" and reply["code"] == "bad_request"
+    assert "not attached" in reply["message"]
+    assert host.killed == 0 and sessions.info() is not None
+    await first.close()
+    await second.close()
+
+
+async def test_a_failing_revoke_task_is_logged_and_the_delete_still_succeeds(
+    client, deps, sessions, monkeypatch, caplog
+):
+    ws, headers = await paired_ws(client, deps)
+    await start(ws)
+
+    async def broken(reason):
+        raise RuntimeError("secret detail")
+
+    monkeypatch.setattr(sessions, "stop", broken)
+    r = await client.delete(f"/harness/pair/browsers/{browser_id(deps)}", headers=headers)
+    assert r.status == 204
+    code, _ = await until_close(ws)
+    assert code == 4401
+    assert "RuntimeError" in caplog.text
+    assert "secret detail" not in caplog.text
+
+
+async def test_app_shutdown_cancels_the_tick_task(aiohttp_client, deps):
+    from aiohttp import web
+
+    from harness.routes import setup, watch_app
+
+    app = web.Application()
+    routes = web.RouteTableDef()
+    setup(routes, deps)
+    app.add_routes(routes)
+    watch_app(app, deps)
+    client = await aiohttp_client(app)
+    ws, _ = await paired_ws(client, deps)
+    ticker = deps.terminal._ticker
+    assert ticker is not None and not ticker.done()
+    await ws.close()
+    await client.close()
+    assert ticker.cancelled()
+
+
+async def test_install_cancels_the_ticker_on_server_shutdown(monkeypatch, tmp_path):
+    from aiohttp import web
+
+    from harness.routes import install
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    fake_folder_paths(monkeypatch, tmp_path / "user" / "__harness", tmp_path)
+    server = FakePromptServer()
+    server.app = web.Application()
+    install(server)
+    assert len(server.app.on_shutdown) == 1

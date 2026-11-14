@@ -494,3 +494,15 @@ def test_failed_start_leaves_no_session_or_sink(mgr, host):
     assert mgr.info() is None
     mgr.attach(a, 80, 24)
     assert host.nudged == 0
+
+
+def test_unknown_cli_message_echoes_at_most_32_characters(mgr, monkeypatch):
+    def missing(cli_id):
+        raise KeyError(cli_id)
+
+    monkeypatch.setattr(cli_mod, "find", missing)
+    with pytest.raises(Refusal) as caught:
+        mgr.start(FakeSink(), "a" * 4000, 80, 24, False)
+    assert caught.value.code == "cli_not_found"
+    assert "a" * 32 in caught.value.message
+    assert "a" * 33 not in caught.value.message

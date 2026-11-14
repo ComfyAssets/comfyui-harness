@@ -15,6 +15,7 @@ from typing import Any, Callable, Coroutine, Deque, Optional, Protocol
 from aiohttp import WSMsgType, web
 
 from .guard import WS_CLOSE, Refusal
+from .pairing import COOKIE_IDLE, COOKIE_MAX
 from .session import HIGH_WATER, TICK_SECONDS
 
 log = logging.getLogger("harness")
@@ -55,6 +56,7 @@ class SocketSink:
         self._over = False
         self._close_requested = False
         self.closing = False
+        self.muted = False
         self._wake = asyncio.Event()
         self._writer = asyncio.get_running_loop().create_task(self._write_all())
 
@@ -67,6 +69,10 @@ class SocketSink:
 
     def buffered(self) -> int:
         return self._buffered
+
+    def mute(self) -> None:
+        """Ignore everything this page sends from now on."""
+        self.muted = True
 
     def close(self, code: int, reason: str) -> None:
         """Close after everything already queued has been sent."""
@@ -179,7 +185,12 @@ class Terminal:
         sink = SocketSink(ws, manager.drained, manager.detach)
         self._sockets[sink] = browser_id
         self._ensure_ticker()
-        _tell(sink, {"type": "hello", "boot": manager.boot, "session": manager.info()})
+        # The upgrade yielded: a revoke or disable may have run since the guard.
+        refused = self._admission(browser_id)
+        if refused is not None:
+            self._shut(sink, *refused)
+        else:
+            _tell(sink, {"type": "hello", "boot": manager.boot, "session": manager.info()})
         try:
             async for msg in ws:
                 if not await self._receive(manager, sink, msg):
@@ -191,18 +202,62 @@ class Terminal:
         return ws
 
     async def disable(self) -> None:
-        """The terminal was switched off: end the session and close every socket."""
-        if self._manager is not None:
-            await self._manager.stop("disabled")
-        self._close(lambda owner: True, WS_CLOSE["disabled"], "disabled")
+        """The terminal was switched off: mute every socket, end the session, close."""
+        targets = list(self._sockets)
+        for sink in targets:
+            sink.mute()
+        try:
+            if self._manager is not None:
+                await self._manager.stop("disabled")
+        finally:
+            for sink in targets:
+                self._shut(sink, WS_CLOSE["disabled"], "disabled")
 
     async def settle(self) -> None:
-        """Wait for work started by pairing events."""
+        """Wait for work started by pairing events. Failures are already logged."""
         if self._tasks:
-            await asyncio.gather(*list(self._tasks))
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+
+    async def shutdown(self) -> None:
+        """The server is stopping: end the tick task."""
+        ticker, self._ticker = self._ticker, None
+        if ticker is not None and not ticker.done():
+            ticker.cancel()
+            await asyncio.wait({ticker})
+
+    def _paired_browser(self, browser_id: str) -> Any:
+        pairing = self._deps.pairing
+        if pairing is None:
+            return None
+        return next((b for b in pairing.browsers() if b.id == browser_id), None)
+
+    def _admission(self, browser_id: Optional[str]) -> Optional[tuple[int, str]]:
+        """Why this browser's socket may not stay open, as (close code, reason)."""
+        browser = None if browser_id is None else self._paired_browser(browser_id)
+        if browser is None:
+            return WS_CLOSE["not_paired"], "revoked"
+        now = self._deps.clock()
+        if now - browser.last_seen > COOKIE_IDLE or now - browser.created > COOKIE_MAX:
+            return WS_CLOSE["not_paired"], "expired"
+        store = self._deps.store
+        if store is None or not store.state.enabled:
+            return WS_CLOSE["disabled"], "disabled"
+        return None
+
+    def _shut(self, sink: SocketSink, code: int, reason: str) -> None:
+        sink.mute()
+        if self._manager is not None:
+            self._manager.detach(sink)
+        sink.close(code, reason)
 
     async def _receive(self, manager: Any, sink: SocketSink, msg: Any) -> bool:
         if sink.closing or msg.type in _STOP_TYPES:
+            return False
+        if sink.muted:
+            return True  # dropped; the close is on its way
+        refused = self._admission(self._sockets.get(sink))
+        if refused is not None and refused[0] == WS_CLOSE["not_paired"]:
+            self._shut(sink, *refused)
             return False
         if msg.type is WSMsgType.BINARY:
             manager.write(sink, msg.data)
@@ -220,6 +275,9 @@ class Terminal:
 
     async def _dispatch(self, manager: Any, sink: SocketSink, message: dict) -> None:
         kind = message["type"]
+        store = self._deps.store
+        if kind in ("start", "attach") and (store is None or not store.state.enabled):
+            raise Refusal("disabled", "The terminal is turned off. Turn it on in the panel.")
         if kind == "attach":
             manager.attach(sink, _size(message, "cols"), _size(message, "rows"))
         elif kind == "start":
@@ -227,6 +285,8 @@ class Terminal:
         elif kind == "resize":
             manager.resize(sink, _size(message, "cols"), _size(message, "rows"))
         elif kind == "stop":
+            if manager.info() is not None and not manager.holds(sink):
+                raise _bad("This page is not attached to the session.")
             await manager.stop("stop")
         else:
             raise _bad("Unknown message type.")
@@ -251,23 +311,35 @@ class Terminal:
             for sink in list(self._sockets):
                 _tell(sink, announcement)
         elif event == "revoked":
-            self._spawn(self._revoked(browser.id))
+            # Mute before anything awaits, so the page cannot act while the session stops.
+            targets = [sink for sink, owner in self._sockets.items() if owner == browser.id]
+            for sink in targets:
+                sink.mute()
+            self._spawn("revoke", self._revoked(targets))
 
-    async def _revoked(self, browser_id: str) -> None:
+    async def _revoked(self, targets: list[SocketSink]) -> None:
         pairing = self._deps.pairing
-        if self._manager is not None and pairing is not None and not pairing.browsers():
-            await self._manager.stop("revoked")
-        self._close(lambda owner: owner == browser_id, WS_CLOSE["not_paired"], "revoked")
+        try:
+            if self._manager is not None and pairing is not None and not pairing.browsers():
+                await self._manager.stop("revoked")
+        finally:
+            for sink in targets:
+                self._shut(sink, WS_CLOSE["not_paired"], "revoked")
 
-    def _close(self, select: Callable[[str], bool], code: int, reason: str) -> None:
+    def _close_stale(self) -> None:
         for sink, owner in list(self._sockets.items()):
-            if select(owner):
-                if self._manager is not None:
-                    self._manager.detach(sink)
-                sink.close(code, reason)
+            refused = self._admission(owner)
+            if not sink.closing and refused is not None and refused[0] == WS_CLOSE["not_paired"]:
+                self._shut(sink, *refused)
 
-    def _spawn(self, work: Coroutine[Any, Any, None]) -> None:
-        task = asyncio.get_running_loop().create_task(work)
+    def _spawn(self, what: str, work: Coroutine[Any, Any, None]) -> None:
+        async def logged() -> None:
+            try:
+                await work
+            except Exception as error:  # noqa: BLE001 - logged; the caller already succeeded
+                log.warning("terminal %s handling failed: %s", what, type(error).__name__)
+
+        task = asyncio.get_running_loop().create_task(logged())
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
@@ -284,3 +356,7 @@ class Terminal:
                     await manager.tick()
             except Exception as error:  # noqa: BLE001 - the ticker must never die
                 log.warning("session tick failed: %s", type(error).__name__)
+            try:
+                self._close_stale()
+            except Exception as error:  # noqa: BLE001 - the ticker must never die
+                log.warning("socket expiry check failed: %s", type(error).__name__)

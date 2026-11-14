@@ -322,6 +322,7 @@ class FakePromptServer:
         from aiohttp import web
 
         self.routes = web.RouteTableDef()
+        self.app = web.Application()
         self.port = 8188
 
 
