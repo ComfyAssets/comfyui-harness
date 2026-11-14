@@ -123,13 +123,26 @@ export function createComfyHost(comfy, win) {
 
   // app.queuePrompt is the Run button's path but returns only a boolean; the
   // prompt id is caught from app.api.queuePrompt, wrapped for this one call.
+  // app.queuePrompt pushes a request onto app.queueItems (request id
+  // app.nextQueueRequestId) and drains the list in a loop, newest first, so an
+  // author's Run pressed meanwhile also passes through the wrapper, before or
+  // after the agent's item. A call is the agent's while the agent's request is
+  // no longer waiting in queueItems; only the first such call is recorded,
+  // every other call goes straight through.
   async function run() {
     if (comfy.processingQueue) throw new BridgeError("busy", QUEUE_BUSY);
     const api = comfy.api;
+    const hadOwn = Object.hasOwn(api, "queuePrompt");
     const original = api.queuePrompt;
+    const ownRequest = comfy.nextQueueRequestId;
+    const ownWaiting = () =>
+      Array.isArray(comfy.queueItems) && comfy.queueItems.some((item) => item?.requestId === ownRequest);
+    let seen = false;
     let reply = null;
     let refused = null;
-    api.queuePrompt = async function queueOnce(...args) {
+    async function queueOnce(...args) {
+      if (seen || ownWaiting()) return original.apply(this, args);
+      seen = true;
       try {
         reply = await original.apply(this, args);
         return reply;
@@ -137,11 +150,16 @@ export function createComfyHost(comfy, win) {
         refused = error;
         throw error;
       }
-    };
+    }
+    api.queuePrompt = queueOnce;
     try {
       await comfy.queuePrompt(0, 1);
     } finally {
-      api.queuePrompt = original;
+      // Put back only our own wrapper; one installed since stays.
+      if (api.queuePrompt === queueOnce) {
+        if (hadOwn) api.queuePrompt = original;
+        else delete api.queuePrompt;
+      }
     }
     if (typeof reply?.prompt_id === "string") return { prompt_id: reply.prompt_id, number: reply.number };
     return { errors: refusalFrom(refused?.response, comfy.lastNodeErrors) };

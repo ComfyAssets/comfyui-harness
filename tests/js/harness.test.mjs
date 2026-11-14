@@ -17,7 +17,7 @@ export async function resolve(specifier, context, next) {
   return next(specifier, context);
 }`;
 register(`data:text/javascript,${encodeURIComponent(hook)}`);
-const { createHarness, terminalOptions } = await import("../../web/harness.js");
+const { createComfyHost, createHarness, terminalOptions } = await import("../../web/harness.js");
 
 const READY = { supported: true, paired: true, enabled: true, cli_found: true, mcp_found: true, session: null };
 
@@ -577,4 +577,113 @@ test("an edit from the bridge shows its notice in the panel with Undo", async ()
   assert.equal(replies(ws)[1].ok, true);
   assert.ok(byText(env.panel.element, "Claude: <b>rename</b>. Added 0, removed 0, changed 1"));
   assert.ok(byText(env.panel.element, "Undo", "BUTTON"));
+});
+
+// ------------------------------------------------------- the real host's run
+
+// A stand-in for ComfyApp in 1.59.1: app.queuePrompt drains every queued
+// request through api.queuePrompt, so an author's Run pressed during the
+// agent's call goes through the same loop after the agent's item.
+class FakeApi {
+  constructor(answers) {
+    this.answers = answers;
+  }
+  async queuePrompt(number, who) {
+    const answer = this.answers[who];
+    if (answer instanceof Error) throw answer;
+    return answer;
+  }
+}
+
+// authorFirst: the author's Run is pushed before the drain starts (while the
+// agent's call awaits its auth token), and the loop pops the newest item
+// first. Otherwise the author's Run arrives while the agent's item is sent.
+function runApp({ answers, authorFirst = false, own = false, swapTo } = {}) {
+  const api = new FakeApi(answers);
+  if (own) api.queuePrompt = FakeApi.prototype.queuePrompt;
+  const root = fakeGraph();
+  const comfy = {
+    api,
+    processingQueue: false,
+    lastNodeErrors: null,
+    rootGraph: root,
+    canvas: { graph: root },
+    queueItems: [],
+    nextQueueRequestId: 7,
+    async queuePrompt() {
+      const push = (who) => comfy.queueItems.push({ requestId: comfy.nextQueueRequestId++, who });
+      push("agent");
+      if (authorFirst) push("author");
+      let authorPending = !authorFirst;
+      while (comfy.queueItems.length) {
+        const item = comfy.queueItems.pop();
+        try {
+          const sending = api.queuePrompt(0, item.who);
+          if (authorPending) {
+            authorPending = false;
+            push("author");
+          }
+          await sending;
+        } catch {
+          // ComfyApp records the refusal and goes on with the next item
+        }
+      }
+      if (swapTo) api.queuePrompt = swapTo;
+      return true;
+    },
+  };
+  return { comfy, api, host: createComfyHost(comfy, {}) };
+}
+
+test("run returns the agent's own prompt id when the author's Run is sent first", async () => {
+  const { host } = runApp({
+    authorFirst: true,
+    answers: { agent: { prompt_id: "agent-id", number: 4 }, author: { prompt_id: "author-id", number: 5 } },
+  });
+  assert.deepEqual(await host.run(), { prompt_id: "agent-id", number: 4 });
+});
+
+function refusedWith(response) {
+  return Object.assign(new Error("refused"), { status: 400, response });
+}
+
+test("run returns the agent's own prompt id when the author's Run drains after it", async () => {
+  const { host } = runApp({
+    answers: { agent: { prompt_id: "agent-id", number: 4 }, author: { prompt_id: "author-id", number: 5 } },
+  });
+  assert.deepEqual(await host.run(), { prompt_id: "agent-id", number: 4 });
+});
+
+test("a refused agent prompt is reported refused even when the author's next one is accepted", async () => {
+  const response = { error: { message: "Prompt outputs failed validation" }, node_errors: {} };
+  const { host } = runApp({
+    answers: { agent: refusedWith(response), author: { prompt_id: "author-id", number: 5 } },
+  });
+  assert.deepEqual(await host.run(), { errors: { message: "Prompt outputs failed validation", nodes: [] } });
+});
+
+test("run leaves api.queuePrompt as it found it: inherited stays inherited, own is put back", async () => {
+  const answers = { agent: { prompt_id: "a", number: 1 }, author: { prompt_id: "b", number: 2 } };
+  const inherited = runApp({ answers });
+  await inherited.host.run();
+  assert.equal(Object.hasOwn(inherited.api, "queuePrompt"), false);
+  const own = runApp({ answers, own: true });
+  const original = own.api.queuePrompt;
+  await own.host.run();
+  assert.equal(Object.hasOwn(own.api, "queuePrompt"), true);
+  assert.equal(own.api.queuePrompt, original);
+});
+
+test("run does not undo someone else's later wrapper of api.queuePrompt", async () => {
+  const theirs = async () => ({ prompt_id: "x", number: 0 });
+  const answers = { agent: { prompt_id: "a", number: 1 }, author: { prompt_id: "b", number: 2 } };
+  const { api, host } = runApp({ answers, swapTo: theirs });
+  await host.run();
+  assert.equal(api.queuePrompt, theirs);
+});
+
+test("run is refused as busy while ComfyUI is already queueing", async () => {
+  const { comfy, host } = runApp({ answers: {} });
+  comfy.processingQueue = true;
+  await assert.rejects(host.run(), (err) => err.code === "busy");
 });

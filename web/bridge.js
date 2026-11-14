@@ -25,7 +25,8 @@ const STALE = "The canvas changed since you read it. Read it again, then retry."
 const TOO_LARGE = "That is too much to send at once. Ask for fewer nodes or a smaller outline.";
 const UNKNOWN_COMMAND = "Unknown command.";
 const TYPES_OR_SEARCH = "Give either types or search, not both.";
-const NOT_QUEUED = "ComfyUI did not queue the prompt.";
+const IN_SUBGRAPH = "Close the subgraph to run the whole workflow, or press Run yourself.";
+const NOT_QUEUED ="ComfyUI did not queue the prompt.";
 const SUMMARY_CHARS = 200;
 const TRACEBACK_LINES = 20;
 // Room for the envelope around a result: {"type":"bridge_reply","rid":"<32 hex>","ok":true,"result":...}.
@@ -135,10 +136,35 @@ export function refusalFrom(response, nodeErrors) {
 
 // ------------------------------------------------------------- helpers
 
-function checkSize(result) {
+function fits(result) {
   const bytes = new TextEncoder().encode(JSON.stringify(result)).length;
-  if (bytes + REPLY_OVERHEAD > LIMITS.replyBytes) throw new BridgeError("too_large", TOO_LARGE);
-  return result;
+  return bytes + REPLY_OVERHEAD <= LIMITS.replyBytes;
+}
+
+// An edit or run has already acted when its result is built, so an over-limit
+// result is cut down, never replaced by an error: the agent must still learn
+// that it applied (and the new fingerprint) or that it queued. Each step is
+// tried in order until one fits.
+const EDIT_LEFT_OUT = "Widget detail left out to fit the reply limit; read the nodes to see their values.";
+const RUN_LEFT_OUT = "Node errors left out to fit the reply limit; get_errors lists them.";
+const CUTS = new Map([
+  [
+    "edit",
+    [
+      ({ widgets, ...rest }) => ({ ...rest, note: EDIT_LEFT_OUT }),
+      ({ widgets, changed_by_node: changed, ...rest }) => ({ ...rest, note: EDIT_LEFT_OUT }),
+    ],
+  ],
+  ["run", [(result) => ({ ...result, errors: { message: text(result.errors?.message), nodes: [] }, note: RUN_LEFT_OUT })]],
+]);
+
+function sized(cmd, result) {
+  if (fits(result)) return result;
+  for (const cut of CUTS.get(cmd) ?? []) {
+    const smaller = cut(result);
+    if (fits(smaller)) return smaller;
+  }
+  throw new BridgeError("too_large", TOO_LARGE);
 }
 
 function sameValue(a, b) {
@@ -207,8 +233,15 @@ export function createBridge({ host, notify, setInterval: every = () => null, cl
       label: "Undo",
       onClick: async () => {
         forget();
+        let latest = false;
         try {
-          if (tracker.isLatest(mark)) await tracker.undo();
+          latest = tracker.isLatest(mark);
+        } catch {
+          latest = false; // the edited tab is gone: nothing to undo here
+        }
+        if (!latest) return;
+        try {
+          await tracker.undo();
         } catch {
           show("Claude's edit could not be undone. Ctrl+Z may help.");
         }
@@ -261,6 +294,9 @@ export function createBridge({ host, notify, setInterval: every = () => null, cl
 
   async function run(args) {
     stale(args);
+    // The fingerprint covers only the graph on screen, and a run queues the
+    // whole workflow: inside a subgraph the agent has not read what would run.
+    if (text(identity()?.graph) !== "root") throw new BridgeError("invalid", IN_SUBGRAPH);
     const outcome = await host.run();
     if (!outcome || typeof outcome.prompt_id !== "string") {
       return { queued: false, errors: outcome?.errors ?? refusalFrom(null, null) };
@@ -340,7 +376,7 @@ export function createBridge({ host, notify, setInterval: every = () => null, cl
     if (!command) throw new BridgeError("invalid", UNKNOWN_COMMAND);
     check();
     const safeArgs = args && typeof args === "object" && !Array.isArray(args) ? args : {};
-    return checkSize(await command(safeArgs));
+    return sized(cmd, await command(safeArgs));
   }
 
   return { handle, check };

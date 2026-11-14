@@ -421,7 +421,7 @@ export function placeNear(graph, anchor, size, { center = [0, 0], ignore } = {})
 // --------------------------------------------------------------- apply
 
 function liveNode(graph, ids, t) {
-  const id = t.ref !== undefined ? ids[t.ref] : t.id;
+  const id = t.ref !== undefined ? ids.get(t.ref) : t.id;
   const node = id === undefined ? null : findNode(graph, id);
   if (!node) throw new Error(`${t.label} is no longer on the canvas.`);
   return node;
@@ -442,7 +442,7 @@ function rightMost(graph, ids, targets) {
   let best = null;
   let bestEdge = -Infinity;
   for (const t of targets) {
-    const id = t.ref !== undefined ? ids[t.ref] : t.id;
+    const id = t.ref !== undefined ? ids.get(t.ref) : t.id;
     const node = id === undefined ? null : findNode(graph, id);
     if (!node) continue;
     const [x, , w] = rectOf(node);
@@ -458,7 +458,7 @@ const APPLY = {
   add_node(ctx, step) {
     const node = ctx.host.createNode(step.type);
     if (!node) throw new Error(`the page could not create a "${step.type}" node.`);
-    ctx.ids[step.ref] = String(node.id);
+    ctx.ids.set(step.ref, String(node.id));
     if (step.title !== undefined) node.title = step.title;
     if (step.pos !== undefined) node.pos = [step.pos[0], step.pos[1]];
     else ctx.unplaced.push({ step, node });
@@ -604,14 +604,14 @@ export async function applyOps(host, ops) {
   const ctx = {
     host,
     graph,
-    ids: {},
+    ids: new Map(), // ref -> new id; a Map, so refs such as "__proto__" are plain names
     widgets: [],
     unplaced: [],
     counts: { added: 0, removed: 0, changed: 0 },
     failedAt: null,
   };
   const failure = runSteps(ctx, tracker, steps);
-  if (!failure) return { ids: ctx.ids, widgets: ctx.widgets, counts: ctx.counts };
+  if (!failure) return { ids: Object.fromEntries(ctx.ids), widgets: ctx.widgets, counts: ctx.counts };
 
   // Node objects are not used past this point: undo and restore reload the graph.
   const restored = await rollBack(host, tracker, before, copy, keyBefore);

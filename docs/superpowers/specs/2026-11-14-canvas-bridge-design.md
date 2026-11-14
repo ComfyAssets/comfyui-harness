@@ -613,6 +613,14 @@ approved continuing with them.
   undo does, so the undo history afterwards is as it was before the batch.
   A batch rolled back by undo is dropped from the redo queue, so Ctrl+Y
   cannot re-apply a failed edit.
+- `run` is refused while a subgraph is open ("Close the subgraph to run the
+  whole workflow, or press Run yourself."): the fingerprint covers only the
+  graph shown, and a run queues the whole workflow.
+- `run` reports the agent's own prompt even when the author presses Run at
+  the same moment (both pass through ComfyUI's one queueing loop).
+- An `edit` or `run` result over the reply limit is cut down (widget detail,
+  then node errors left out, with a note) instead of becoming `too_large`,
+  because it has already acted.
 - The Undo notice is re-checked on the tracker's `graphChanged` event, on
   every bridge command and once a second while it is shown.
 - The graph shown is the canvas's graph (root, or the opened subgraph).

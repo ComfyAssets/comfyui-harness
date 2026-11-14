@@ -26,6 +26,7 @@ const TYPES = {
     inputs: { images: { name: "images", type: "IMAGE" } },
     outputs: [],
   },
+  Note: { display_name: "Note", inputs: { text: { name: "text", type: "STRING", multiline: true } }, outputs: [] },
 };
 
 const IDENTITY = { workflow: "workflows/a.json", graph: "root", name: "a" };
@@ -230,7 +231,7 @@ test("an edit returns the new fingerprint, which differs from the old one", asyn
 });
 
 test("an edit reports widget values and those the node changed", async () => {
-  const env = setup({ rewrite: (node, widget, value) => (value > 4096 ? 4096 : value) });
+  const env = setup({ rewrite: (_node, _widget, value) => (value > 4096 ? 4096 : value) });
   const result = await editOnce(env, {
     ops: [
       { op: "set_widget", node: 1, widget: "width", value: 640 },
@@ -397,7 +398,71 @@ test("an Undo the page cannot do says so instead of failing silently", async () 
   assert.equal(env.notices.at(-1).text, "Claude's edit could not be undone. Ctrl+Z may help.");
 });
 
+test("an Undo after the edited tab has gone quietly removes the notice", async () => {
+  const env = setup();
+  await editOnce(env);
+  env.tracker.isLatest = () => {
+    throw new Error("no change tracker");
+  };
+  await env.press(env.notices[0]);
+  assert.equal(env.notices.length, 1, "no 'could not be undone' notice");
+  assert.equal(env.tracker.undoCalls, 0);
+  assert.equal(env.timers.size, 0);
+});
+
+test("an edit whose full result is over the reply limit still reports that it applied", async () => {
+  const graph = canvas();
+  graph.addNode({ id: 5, type: "Note", widgets: [{ name: "text", type: "customtext", value: "" }] });
+  const env = setup({ graph });
+  const big = "x".repeat(300 * 1024);
+  const result = await editOnce(env, {
+    ops: [
+      { op: "add_node", ref: "n", type: "Note" },
+      { op: "set_widget", node: 5, widget: "text", value: big },
+    ],
+  });
+  assert.equal(result.applied, true);
+  assert.equal(result.fingerprint, env.fp());
+  assert.deepEqual(result.ids, { n: "6" });
+  assert.equal(result.widgets, undefined);
+  assert.match(result.note, /left out/);
+  assert.ok(new TextEncoder().encode(JSON.stringify(result)).length < LIMITS.replyBytes);
+  assert.equal(env.graph.getNodeById("5").widgets[0].value, big, "the edit stayed applied");
+});
+
+test("an edit whose widget changes alone are over the limit drops them too", async () => {
+  const graph = canvas();
+  graph.addNode({ id: 5, type: "Note", widgets: [{ name: "text", type: "customtext", value: "" }] });
+  const env = setup({ graph, rewrite: (_node, _widget, value) => value + "!" });
+  const result = await editOnce(env, {
+    ops: [{ op: "set_widget", node: 5, widget: "text", value: "y".repeat(300 * 1024) }],
+  });
+  assert.equal(result.applied, true);
+  assert.equal(result.changed_by_node, undefined);
+  assert.equal(result.widgets, undefined);
+  assert.ok(new TextEncoder().encode(JSON.stringify(result)).length < LIMITS.replyBytes);
+});
+
 // -------------------------------------------------------------------- run
+
+test("run is refused while a subgraph is open", async () => {
+  const env = setup({ identity: { ...IDENTITY, graph: "4e07f039-055b-4fc9-9c45-7e9f50ce7977" } });
+  const err = await refused(env.bridge.handle("run", { fingerprint: env.fp() }));
+  assert.ok(err instanceof BridgeError);
+  assert.equal(err.code, "invalid");
+  assert.equal(err.message, "Close the subgraph to run the whole workflow, or press Run yourself.");
+  assert.equal(env.state.runs, 0);
+});
+
+test("a refusal whose errors are over the limit is cut, not turned into too_large", async () => {
+  const nodes = Array.from({ length: 3000 }, (_, i) => ({ id: String(i), type: "T", reasons: ["r".repeat(200)] }));
+  const env = setup({ run: async () => ({ errors: { message: "Prompt outputs failed validation", nodes } }) });
+  const result = await env.bridge.handle("run", { fingerprint: env.fp() });
+  assert.equal(result.queued, false);
+  assert.equal(result.errors.message, "Prompt outputs failed validation");
+  assert.deepEqual(result.errors.nodes, []);
+  assert.match(result.note, /left out/);
+});
 
 test("a Cancel the server refuses says so", async () => {
   const env = setup();

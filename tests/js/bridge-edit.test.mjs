@@ -144,6 +144,24 @@ test("typesMatch: exact, wildcard either side, comma-joined, and a mismatch", ()
 
 // ---------------------------------------------------------------- apply
 
+test("refs named like Object properties are plain names", async () => {
+  const graph = canvas();
+  const host = fakeHost({ graph, types: TYPES });
+  const result = await applyOps(host, [
+    { op: "add_node", ref: "__proto__", type: "SaveImage" },
+    { op: "add_node", ref: "constructor", type: "PreviewImage" },
+    { op: "connect", from: 8, output: "IMAGE", to: "__proto__", input: "images" },
+    { op: "connect", from: 8, output: "IMAGE", to: "constructor", input: "images" },
+  ]);
+  assert.equal(Object.getPrototypeOf(result.ids), Object.prototype);
+  assert.deepEqual(Object.keys(result.ids), ["__proto__", "constructor"]);
+  const save = findNode(graph, result.ids["__proto__"]);
+  assert.equal(save.type, "SaveImage");
+  assert.equal(graph.links.get(save.inputs[0].link).origin_id, "8");
+  assert.equal(findNode(graph, result.ids.constructor).type, "PreviewImage");
+  assert.equal({}.polluted, undefined);
+});
+
 test("a valid batch adds, wires and sets, and refs resolve to the new ids", async () => {
   const graph = canvas();
   const host = fakeHost({ graph, types: TYPES });

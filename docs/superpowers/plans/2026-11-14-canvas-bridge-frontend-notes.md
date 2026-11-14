@@ -452,10 +452,24 @@ async function run() {
 }
 ```
 
-- `app.queuePrompt` returns `false` without queuing when
-  `app.processingQueue` is already true (another queue in progress); the
-  wrapper then captures nothing. Check `app.processingQueue` first and refuse
-  with "busy".
+- `app.queuePrompt` first **pushes** its request onto `app.queueItems`, and
+  only then returns `false` when `app.processingQueue` is already true; the
+  call already in progress drains every item in a loop
+  (`for(;this.queueItems.length;){ … this.queueItems.pop() … await api.queuePrompt(…) }`,
+  checked in the 1.59.1 bundle). So a call made while another is processing
+  is not dropped: it is sent later by the first call. Consequences for the
+  wrapper: check `app.processingQueue` first and refuse with "busy" (else
+  the agent's run goes through someone else's call and the wrapper sees
+  nothing); and capture only the **first** call through the wrapper, since
+  an author's Run pressed during the agent's call is drained by the same
+  loop and passes through the wrapper too. The loop pops the **newest**
+  item first, so an author's Run pushed while the agent's call still awaits
+  its auth token is sent *before* the agent's. Each item carries
+  `requestId` from `app.nextQueueRequestId++`; read that counter just before
+  calling `app.queuePrompt` and treat a wrapper call as the agent's only
+  once its item is no longer in `app.queueItems` (it has been popped), and
+  record only the first such call. The sketch above captures the last call;
+  `web/harness.js` does the above.
 - `number` counts per server, not per page (0, 2, 4, 5, 6 in one session).
 - A validation refusal produced no dialog (only the overlay and node
   badges).
