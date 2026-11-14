@@ -1,7 +1,7 @@
 PYTHON := .venv/bin/python
 PY_SOURCES := harness $(wildcard pair.py)
 
-.PHONY: test coverage lint js-test browser-test
+.PHONY: test coverage lint js-test browser-test comfyui-test
 
 test:
 	$(PYTHON) -m pytest
@@ -20,3 +20,7 @@ js-test:
 
 browser-test:
 	npm --prefix tools/testing run test:browser
+
+# Not in CI: needs a local ComfyUI checkout (COMFYUI_DIR, default ~/comfy/ComfyUI).
+comfyui-test:
+	npm --prefix tools/testing run test:comfyui

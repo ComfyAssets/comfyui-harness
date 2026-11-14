@@ -5,7 +5,8 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "test": "node --test ../../tests/js/*.test.mjs",
-    "test:browser": "playwright test --config playwright.config.mjs"
+    "test:browser": "playwright test --config playwright.config.mjs",
+    "test:comfyui": "playwright test --config comfyui.config.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.65.1"
