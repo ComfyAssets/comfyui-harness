@@ -448,7 +448,7 @@ Binary frames are terminal bytes. Text frames are JSON. Heartbeat every 25 s.
 | server to page | `{type:"started"}`, `{type:"exit", code}`, `{type:"detached", reason}`, `{type:"error", code, message}` |
 
 `detached.reason` is one of `taken_over`, `revoked`, `disabled`, `idle`,
-`limit`. `boot` changes on every server start; a page that sees a new value
+`limit`, `stop` (the page asked to end the session). `boot` changes on every server start; a page that sees a new value
 shows "server restarted". Close codes: 4401 not paired, 4403 bad origin,
 4409 disabled.
 
