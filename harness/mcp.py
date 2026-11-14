@@ -1,6 +1,7 @@
 """MCP over JSON-RPC, by hand. Pure: no aiohttp, no state, no I/O."""
 
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional, Sequence
 
@@ -55,7 +56,7 @@ def _is_type(name: str, value: Any) -> bool:
         return False
     if name == "integer":
         return isinstance(value, int)
-    return name == "number" and isinstance(value, (int, float))
+    return name == "number" and isinstance(value, (int, float)) and math.isfinite(value)
 
 
 def _same(a: Any, b: Any) -> bool:
@@ -138,6 +139,13 @@ def _reject_constant(token: str) -> Any:
     raise ValueError("non-finite number")
 
 
+def _parse_float(token: str) -> float:
+    number = float(token)
+    if not math.isfinite(number):
+        raise ValueError("non-finite number")
+    return number
+
+
 def _error(status: int, code: int, message: str, request_id: Any = None) -> Reply:
     body = {
         "jsonrpc": "2.0",
@@ -176,7 +184,7 @@ async def _tools_call(params: Any, request_id: Any, tools: Sequence[Tool], call:
         return _error(200, INVALID_PARAMS, "arguments must be an object", request_id)
     tool = next((t for t in tools if t.name == name), None)
     if tool is None:
-        return _error(200, INVALID_PARAMS, "unknown tool", request_id)
+        return _error(200, INVALID_PARAMS, f'Unknown tool "{name}".', request_id)
     problem = validate(tool.schema, arguments)
     if problem:
         return _result(request_id, _tool_result(problem, True))
@@ -195,12 +203,16 @@ async def handle(raw: bytes, tools: Sequence[Tool], call: ToolCall) -> Reply:
     if len(raw) > MAX_BODY:
         return _error(413, INVALID_REQUEST, "request body too large")
     try:
-        message = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
+        message = json.loads(
+            raw.decode("utf-8"), parse_constant=_reject_constant, parse_float=_parse_float
+        )
     except (ValueError, RecursionError):
         return _error(400, PARSE_ERROR, "parse error")
     if not isinstance(message, dict):
         return _error(400, INVALID_REQUEST, "invalid request")
     request_id = message.get("id")
+    if "id" in message and (isinstance(request_id, bool) or not isinstance(request_id, (str, int))):
+        return _error(400, INVALID_REQUEST, "invalid request")
     method = message.get("method")
     if message.get("jsonrpc") != "2.0" or not isinstance(method, str):
         return _error(400, INVALID_REQUEST, "invalid request", request_id)

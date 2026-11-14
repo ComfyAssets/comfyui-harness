@@ -359,3 +359,54 @@ def test_validate_one_of() -> None:
 def test_validate_custom_path() -> None:
     msg = validate({"type": "string"}, 1, "thing")
     assert msg is not None and msg.startswith("thing")
+
+
+async def test_exponent_overflow_is_parse_error_in_arguments() -> None:
+    raw = (
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+        b'"params":{"name":"echo","arguments":{"n":1e999}}}'
+    )
+    reply = await run(raw)
+    assert reply.status == 400
+    assert reply.body is not None
+    assert reply.body["error"]["code"] == -32700
+
+
+async def test_exponent_overflow_anywhere_is_parse_error() -> None:
+    reply = await run(b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{"x":-1e999}}')
+    assert reply.status == 400
+    assert reply.body is not None
+    assert reply.body["error"]["code"] == -32700
+
+
+def test_validate_rejects_non_finite_numbers() -> None:
+    assert validate({"type": "number"}, float("inf")) is not None
+    assert validate({"type": "number"}, float("nan")) is not None
+    assert validate({"type": "number"}, 1e300) is None
+
+
+@pytest.mark.parametrize(
+    "raw_id", ["true", "1.5", "{}", "[]", "null", "[" * 900 + "]" * 900, '{"a":1}']
+)
+async def test_odd_ids_are_invalid_request(raw_id: str) -> None:
+    raw = ('{"jsonrpc":"2.0","method":"ping","id":' + raw_id + "}").encode()
+    reply = await run(raw)
+    assert reply.status == 400
+    assert reply.body is not None
+    assert reply.body["error"]["code"] == -32600
+    assert reply.body["id"] is None
+
+
+@pytest.mark.parametrize("good_id", ["abc", 7, 0])
+async def test_string_and_integer_ids_are_echoed(good_id: Any) -> None:
+    reply = await run(rpc("ping", id=good_id))
+    assert reply.status == 200
+    assert reply.body is not None
+    assert reply.body["id"] == good_id
+
+
+async def test_unknown_tool_error_names_the_tool() -> None:
+    reply = await run(rpc("tools/call", {"name": "foo", "arguments": {}}, id=5))
+    assert reply.body is not None
+    assert reply.body["error"]["code"] == -32602
+    assert reply.body["error"]["message"] == 'Unknown tool "foo".'
