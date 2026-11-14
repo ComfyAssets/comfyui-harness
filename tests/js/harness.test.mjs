@@ -381,3 +381,19 @@ test("server rows show a rendering failure as text instead of rejecting", async 
   await flush();
   assert.match(holder.textContent, /not iterable|Could not/);
 });
+
+// Found in Chromium: after switching off and on again, the page said the session
+// ended "while you were away" and waited for a second click instead of starting.
+test("turning the terminal back on starts a new session at once", async () => {
+  const env = await openReady();
+  env.socket().receive({ type: "hello", boot: "b1", session: null });
+  env.state.status = { ...env.state.status, enabled: false };
+  env.socket().receive({ type: "detached", reason: "disabled" });
+  env.socket().drop(4409);
+  byText(env.panel.element, "Turn the terminal on", "BUTTON").click();
+  await flush();
+  const ws = env.socket();
+  ws.receive({ type: "hello", boot: "b1", session: null });
+  assert.deepEqual(ws.json().at(-1), { type: "start", cli: "claude", cols: 80, rows: 24, resume: false });
+  assert.equal(byText(env.panel.element, "Start again", "BUTTON"), undefined);
+});

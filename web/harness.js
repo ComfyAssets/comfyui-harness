@@ -241,6 +241,9 @@ export function createHarness({
         panel.showError(error.message);
         return;
       }
+      // Switching off ended the session on purpose; switching on means a new one.
+      session = null;
+      pendingResume = null;
       await open();
     } else if (action === "start" || action === "continue") {
       session = null;
