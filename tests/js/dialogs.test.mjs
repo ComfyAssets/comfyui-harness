@@ -362,5 +362,5 @@ test("request a new code is the primary action", async () => {
   s.dialog.open();
   await s.tick();
   await s.poll();
-  assert.equal(s.byText("Request a new code", "BUTTON").style.background, "var(--primary-background)");
+  assert.match(s.byText("Request a new code", "BUTTON").style.background, /^var\(--primary-background, /);
 });

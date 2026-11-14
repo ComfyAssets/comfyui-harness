@@ -16,14 +16,20 @@ export const TOKENS = Object.freeze({
 
 const SOLID = {
   minHeight: "36px", padding: "0.45rem 1rem", borderRadius: "10px", border: "none",
-  color: "var(--base-foreground)", fontSize: "14px", fontWeight: "600",
+  color: "var(--base-foreground, #fff)", fontSize: "14px", fontWeight: "600",
   fontFamily: TOKENS.font, lineHeight: "1", whiteSpace: "nowrap",
 };
 
+// Not every frontend defines every variable (1.59.1 has no --destructive-background or
+// --primary-background-hover), and a missing one with no fallback paints nothing.
+const PRIMARY = "var(--primary-background, #2b7fff)";
+const SECONDARY = "var(--secondary-background, #2a2d35)";
+const DESTRUCTIVE = "var(--destructive-background, var(--destructive, #c2410c))";
+
 export const BUTTON_VARIANTS = Object.freeze({
-  primary: { idle: "var(--primary-background)", hover: "var(--primary-background-hover)", base: SOLID },
-  secondary: { idle: "var(--secondary-background)", hover: "var(--secondary-background-hover)", base: SOLID },
-  destructive: { idle: "var(--destructive-background)", hover: "var(--destructive-background-hover)", base: SOLID },
+  primary: { idle: PRIMARY, hover: `var(--primary-background-hover, ${PRIMARY})`, base: SOLID },
+  secondary: { idle: SECONDARY, hover: `var(--secondary-background-hover, ${SECONDARY})`, base: SOLID },
+  destructive: { idle: DESTRUCTIVE, hover: `var(--destructive-background-hover, ${DESTRUCTIVE})`, base: SOLID },
   icon: {
     idle: "transparent",
     hover: "var(--secondary-background-hover, rgba(255, 255, 255, 0.1))",

@@ -179,7 +179,34 @@ test("an unsupported platform sees a message and no buttons", () => {
 
 test("server row buttons use ComfyUI's style: pair is primary, revoke is destructive", () => {
   const unpaired = renderServerRows({ document: fakeDocument(), io: fakeIo(), status: { supported: true, paired: false, enabled: true }, browsers: [], onPair: () => {} });
-  assert.equal(buttons(unpaired)[0].style.background, "var(--primary-background)");
+  assert.match(buttons(unpaired)[0].style.background, /^var\(--primary-background, /);
   const paired = renderServerRows({ document: fakeDocument(), io: fakeIo(), status: PAIRED, browsers: BROWSERS, onPair: () => {} });
-  for (const b of buttons(paired).filter((x) => x.textContent === "Revoke")) assert.equal(b.style.background, "var(--destructive-background)");
+  for (const b of buttons(paired).filter((x) => x.textContent === "Revoke")) assert.match(b.style.background, /^var\(--destructive-background, /);
+});
+
+test("every setting has its own three-part category path, so none hides another", () => {
+  const app = { ui: { settings: { addSetting: (s) => app.added.push(s) } }, added: [] };
+  registerSettings(app, { onChange: () => {}, serverRows: () => ({}) });
+  const paths = app.added.map((s) => s.category.join("/"));
+  for (const s of app.added) assert.equal(s.category.length, 3, s.id);
+  assert.equal(new Set(paths).size, paths.length);
+  assert.deepEqual(app.added.find((s) => s.id === IDS.opacity).category, ["Harness", "Look", "Opacity (%)"]);
+});
+
+test("each paired browser is a row with its name, details, a badge for this browser and Revoke at the end", () => {
+  const el = renderServerRows({ document: fakeDocument(), io: fakeIo(), status: PAIRED, browsers: BROWSERS, onPair: () => {} });
+  const rows = el.find((e) => e.attributes["data-browser"] !== undefined);
+  for (const row of rows) {
+    assert.equal(row.style.display, "flex");
+    assert.equal(row.children.at(-1).textContent, "Revoke");
+  }
+  const current = rows.find((r) => r.textContent.includes("this browser"));
+  const badge = current.find((e) => e.textContent === "this browser")[0];
+  assert.ok(badge.style.borderRadius);
+});
+
+test("found and not found lines carry a mark so they read at a glance", () => {
+  const el = renderServerRows({ document: fakeDocument(), io: fakeIo(), status: { ...PAIRED, mcp_found: false }, browsers: [], onPair: () => {} });
+  assert.ok(el.find((e) => e.textContent === "✓")[0]);
+  assert.ok(el.find((e) => e.textContent === "✗")[0]);
 });

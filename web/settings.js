@@ -4,7 +4,7 @@
 // server every time and is never stored here.
 import { DEFAULTS, format, parse } from "./keys.js";
 import { revokeBrowser, setEnabled } from "./client.js";
-import { styleButton } from "./style.js";
+import { TOKENS, css, styleButton } from "./style.js";
 
 export const IDS = {
   openKey: "Harness.OpenKey",
@@ -85,10 +85,12 @@ export function registerSettings(app, { onChange = () => {}, serverRows } = {}) 
       defaultValue: 14, attrs: { min: 8, max: 32, step: 1 }, onChange: numeric(IDS.fontSize),
     },
   ];
-  for (const row of rows) add(row);
+  // The frontend files each setting at its category path; a two-part path is shared by
+  // every row in the group and only the last one shows. The third part is the row's name.
+  for (const row of rows) add({ ...row, category: [...row.category, row.name] });
   if (typeof serverRows === "function") {
     // A function type makes the frontend append the element it returns; nothing is stored.
-    add({ id: SERVER_ID, name: "Server", category: [CATEGORY, "Server"], type: () => serverRows(), defaultValue: "" });
+    add({ id: SERVER_ID, name: "Server", category: [CATEGORY, "Server", "Server"], type: () => serverRows(), defaultValue: "" });
   }
 }
 
@@ -103,9 +105,14 @@ export function renderServerRows({ document, io, status, browsers = [], onPair =
     if (text !== undefined) el.textContent = text;
     return el;
   };
-  const root = make("div");
+  const styled = (tag, text, styles) => css(make(tag, text), styles);
+  const MUTED = { color: TOKENS.muted, fontSize: "12px" };
+  const root = styled("div", undefined, {
+    display: "flex", flexDirection: "column", gap: "10px", width: "100%",
+    fontFamily: TOKENS.font, fontSize: "14px", color: TOKENS.text,
+  });
   root.setAttribute("data-harness", "server-rows");
-  const message = make("p");
+  const message = styled("p", undefined, { margin: "0", color: "var(--error-text, #ff8080)" });
 
   async function act(call) {
     message.textContent = "";
@@ -118,50 +125,74 @@ export function renderServerRows({ document, io, status, browsers = [], onPair =
     onChange();
   }
 
+  const line = (text) => styled("p", text, { margin: "0" });
+
   if (!status) {
-    root.append(make("p", "Could not reach the server."));
+    root.append(line("Could not reach the server."));
     return root;
   }
   if (!status.supported) {
-    root.append(make("p", "Not supported on this platform"));
+    root.append(line("Not supported on this platform"));
     return root;
   }
   if (!status.paired) {
     const pair = styleButton(make("button", "Pair this browser"), "primary");
+    css(pair, { alignSelf: "flex-start" });
     pair.addEventListener("click", () => onPair());
     root.append(pair);
     return root;
   }
 
-  const switchLabel = make("label");
+  const switchLabel = styled("label", undefined, { display: "flex", alignItems: "center", gap: "10px", cursor: "pointer", fontWeight: "600" });
   const box = make("input");
   box.setAttribute("type", "checkbox");
   box.setAttribute("role", "switch");
+  css(box, { width: "16px", height: "16px", margin: "0", accentColor: TOKENS.accent, cursor: "pointer" });
   box.checked = Boolean(status.enabled);
   box.addEventListener("change", () => act(() => setEnabled(io, Boolean(box.checked))));
-  switchLabel.append(box, make("span", " Terminal enabled"));
+  switchLabel.append(box, make("span", "Terminal enabled"));
   root.append(switchLabel);
 
-  root.append(make("p", status.cli_found ? "Claude Code found" : "Claude Code not found"));
-  if (status.mcp_found) {
-    root.append(make("p", "comfy-mcp found"));
-  } else {
-    const hint = make("div");
-    hint.append(make("p", "comfy-mcp not found"), make("span", "Install it with: "), make("code", MCP_HINT));
-    root.append(hint);
-  }
+  const found = (ok, text, hint) => {
+    const row = styled("div", undefined, { display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap" });
+    const mark = styled("span", ok ? "✓" : "✗", { color: ok ? "var(--success-text, #4ade80)" : "var(--error-text, #ff8080)", fontWeight: "700" });
+    row.append(mark, make("span", text));
+    if (hint) {
+      row.append(
+        styled("span", "Install it with:", MUTED),
+        styled("code", hint, { fontFamily: TOKENS.mono, fontSize: "12px", padding: "1px 6px", borderRadius: "6px", background: TOKENS.input }),
+      );
+    }
+    return row;
+  };
+  root.append(found(status.cli_found, status.cli_found ? "Claude Code found" : "Claude Code not found"));
+  root.append(status.mcp_found ? found(true, "comfy-mcp found") : found(false, "comfy-mcp not found", MCP_HINT));
 
-  const list = make("div");
-  list.append(make("h4", "Paired browsers"));
+  const list = styled("div", undefined, { display: "flex", flexDirection: "column", gap: "8px", marginTop: "6px" });
+  list.append(styled("h4", "Paired browsers", { margin: "0", fontSize: "13px", fontWeight: "600" }));
   for (const browser of browsers) {
-    const row = make("div");
+    const row = styled("div", undefined, {
+      display: "flex", alignItems: "center", gap: "12px", padding: "10px 12px",
+      border: `1px solid ${TOKENS.border}`, borderRadius: "10px", background: TOKENS.panel,
+    });
     row.setAttribute("data-browser", String(browser.id));
+    const info = styled("div", undefined, { display: "flex", flexDirection: "column", gap: "2px", flex: "1 1 auto", minWidth: "0" });
+    const title = styled("div", undefined, { display: "flex", alignItems: "center", gap: "8px", fontWeight: "600" });
+    title.append(make("span", String(browser.label)));
+    if (browser.current) {
+      title.append(styled("span", "this browser", {
+        fontSize: "11px", fontWeight: "600", padding: "2px 8px", borderRadius: "999px",
+        background: TOKENS.accent, color: "var(--base-foreground, #fff)",
+      }));
+    }
+    info.append(
+      title,
+      styled("span", String(browser.origin), { ...MUTED, overflowWrap: "anywhere" }),
+      styled("span", `Last seen ${lastSeen(browser.last_seen)}`, MUTED),
+    );
     const revoke = styleButton(make("button", "Revoke"), "destructive");
     revoke.addEventListener("click", () => act(() => revokeBrowser(io, browser.id)));
-    row.append(make("span", String(browser.label)), make("span", ` ${browser.origin} `));
-    row.append(make("span", `Last seen ${lastSeen(browser.last_seen)} `));
-    if (browser.current) row.append(make("strong", "this browser"));
-    row.append(revoke);
+    row.append(info, revoke);
     list.append(row);
   }
   root.append(list, message);
