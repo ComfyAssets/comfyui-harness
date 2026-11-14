@@ -137,21 +137,16 @@ test("socket does not reconnect after detached taken_over", () => {
   assert.equal(FakeWebSocket.instances.length, 1);
 });
 
-test("socket does not reconnect after any detached reason other than none", () => {
-  const h = harness();
-  h.sock().open();
-  h.sock().text({ type: "detached", reason: "stopped" });
-  h.sock().drop();
-  assert.equal(h.live().length, 0);
-});
-
-test("detached with reason none does not block reconnect", () => {
-  const h = harness();
-  h.sock().open();
-  h.sock().text({ type: "detached", reason: "none" });
-  h.sock().drop();
-  assert.equal(h.live().length, 1);
-});
+for (const reason of ["stopped", "idle", "limit", "revoked", "disabled", "none", "anything"]) {
+  test(`socket does not reconnect after detached ${reason}`, () => {
+    const h = harness();
+    h.sock().open();
+    h.sock().text({ type: "detached", reason });
+    h.sock().drop();
+    assert.equal(h.live().length, 0);
+    assert.equal(h.closes.at(-1).willReconnect, false);
+  });
+}
 
 for (const code of [4401, 4403, 4409]) {
   test(`socket does not reconnect after close ${code}`, () => {

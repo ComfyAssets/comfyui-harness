@@ -101,7 +101,7 @@ export function openSocket({
         } catch {
           return;
         }
-        if (message && message.type === "detached" && message.reason !== "none") stopped = true;
+        if (message && message.type === "detached") stopped = true; // every detach is final
         onMessage(message);
       } else {
         onBytes(new Uint8Array(event.data));
