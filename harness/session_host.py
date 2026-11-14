@@ -15,6 +15,7 @@ import os
 import pty
 import shutil
 import signal
+import stat
 import struct
 
 # argv comes from a fixed table of agent CLIs, never from the browser.
@@ -39,6 +40,8 @@ MAX_EXIT_DRAIN = 1024 * 1024
 HUP_GRACE = 2.0
 TERM_GRACE = 5.0
 KILL_POLL = 0.05
+REAP_GRACE = 2.0
+CHILD_WAIT_LIMIT = 5.0
 EXIT_UNKNOWN = 255
 PID_FILE_MODE = 0o600
 MAX_PID_FILE_BYTES = 64
@@ -111,10 +114,19 @@ def _check_program(argv0: str, cwd: Path, env: Mapping[str, str]) -> None:
     raise FileNotFoundError(errno.ENOENT, "program not found", argv0)
 
 
+def _open_regular(pid_path: Path, flags: int) -> int:
+    """Open without following a symlink or blocking on a FIFO; refuse non-files."""
+    fd = os.open(pid_path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, PID_FILE_MODE)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise OSError(errno.EINVAL, "not a regular file", str(pid_path))
+    return fd
+
+
 def _write_pid_file(pid_path: Path, record: str) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-    fd = os.open(pid_path, flags, PID_FILE_MODE)
+    fd = _open_regular(pid_path, os.O_WRONLY | os.O_CREAT)
     try:
+        os.ftruncate(fd, 0)
         os.write(fd, record.encode("ascii"))
     finally:
         os.close(fd)
@@ -122,7 +134,7 @@ def _write_pid_file(pid_path: Path, record: str) -> None:
 
 def _read_pid_file(pid_path: Path) -> Optional[str]:
     try:
-        fd = os.open(pid_path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = _open_regular(pid_path, os.O_RDONLY)
     except FileNotFoundError:
         return None
     try:
@@ -229,7 +241,8 @@ class PtySessionHost:
             _set_winsize(master, self._cols, self._rows)
             # argv comes from a fixed table of agent CLIs, never from the browser.
             proc = subprocess.Popen(  # nosec B603
-                [sys.executable, "-c", _TRAMPOLINE, *argv],
+                # -I: the trampoline must not import modules from the workspace.
+                [sys.executable, "-I", "-c", _TRAMPOLINE, *argv],
                 stdin=slave,
                 stdout=slave,
                 stderr=slave,
@@ -245,19 +258,20 @@ class PtySessionHost:
         os.close(slave)
         try:
             self._record_pid(proc.pid)
+            _register(proc.pid)
+            threading.Thread(
+                target=self._wait_child,
+                args=(proc.pid,),
+                name=f"harness-wait-{proc.pid}",
+                daemon=True,
+            ).start()
         except BaseException:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
-            os.close(master)
+            self._abandon_start(proc, master)
             raise
         os.set_blocking(master, False)
         self._proc, self._pid, self._master = proc, proc.pid, master
         self._on_output, self._on_exit = on_output, on_exit
-        _register(proc.pid)
         self._start_reading()
-        threading.Thread(
-            target=self._wait_child, args=(proc.pid,), name=f"harness-wait-{proc.pid}", daemon=True
-        ).start()
         log.info("started session process group %d", proc.pid)
 
     def write(self, data: bytes) -> None:
@@ -310,9 +324,28 @@ class PtySessionHost:
                 break
         # Also sweeps any member that outlived the leader.
         self._signal_group(signal.SIGKILL)
-        await self._exited.wait()
+        try:
+            await asyncio.wait_for(asyncio.shield(self._exited.wait()), REAP_GRACE)
+        except asyncio.TimeoutError:
+            log.warning("session process group %d not reaped after SIGKILL", self._pid)
 
     # -- internals ---------------------------------------------------------
+
+    def _abandon_start(self, proc: subprocess.Popen, master: int) -> None:
+        """Undo a half-finished start without masking the error that caused it."""
+        try:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=CHILD_WAIT_LIMIT)
+            except subprocess.TimeoutExpired:
+                log.warning("process group %d not reaped after a failed start", proc.pid)
+        finally:
+            os.close(master)
+            _unregister(proc.pid)
+            _remove(self._pid_path)
 
     def _record_pid(self, pid: int) -> None:
         started = _start_time(pid)
@@ -425,9 +458,14 @@ class PtySessionHost:
         self._finished = True
         self._exited.set()
         log.info("session process group %d exited with %d", self._pid, code)
-        if tail:
-            self._on_output(tail)
-        self._on_exit(code)
+        try:
+            if tail:
+                self._on_output(tail)
+        except Exception as exc:
+            # The type only: the tail is terminal output and must not reach the log.
+            log.error("on_output failed on the exit tail: %s", type(exc).__name__)
+        finally:
+            self._on_exit(code)
 
     def _drain(self) -> bytes:
         """Read what the child wrote before it exited, up to a bound."""

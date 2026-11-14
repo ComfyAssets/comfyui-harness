@@ -440,3 +440,116 @@ def test_reap_stale_does_not_follow_a_symlink(tmp_path):
     pid_path.symlink_to(target)
     assert reap_stale(pid_path) is False
     assert target.exists()
+
+
+async def test_on_exit_is_reported_even_if_on_output_raises_on_the_tail(tmp_path, caplog):
+    loop = asyncio.get_running_loop()
+    pty_host = PtySessionHost(loop, tmp_path / "session.pid")
+    exits: list[int] = []
+    done = asyncio.Event()
+
+    def broken_output(data: bytes) -> None:
+        raise RuntimeError("consumer failed")
+
+    def on_exit(code: int) -> None:
+        exits.append(code)
+        done.set()
+
+    pty_host.start(
+        [sys.executable, str(CHILD), "exit", "3"],
+        tmp_path,
+        dict(os.environ),
+        80,
+        24,
+        broken_output,
+        on_exit,
+    )
+    pty_host.pause_output()  # everything the child writes arrives as the exit tail
+    await asyncio.wait_for(done.wait(), TIMEOUT)
+    await asyncio.sleep(0.1)
+    assert exits == [3]
+    assert not pty_host.running
+    assert "RuntimeError" in caplog.text
+    assert "bye" not in caplog.text
+
+
+async def test_trampoline_does_not_import_modules_from_the_working_directory(host, tmp_path):
+    for name in ("termios", "fcntl", "os"):
+        (tmp_path / f"{name}.py").write_text("print('HIJACKED', flush=True)\n")
+    host.start("tty")
+    assert await host.collect(lambda o: b"tty " in o)
+    assert b"HIJACKED" not in host.output
+    assert b"tty ok" in host.output
+
+
+async def test_input_over_the_pending_cap_is_dropped_and_not_logged(host, monkeypatch, caplog):
+    monkeypatch.setattr(session_host, "MAX_PENDING_INPUT", 10)
+    host.start("echo")
+    assert await host.collect(lambda o: b"ready" in o)
+    host.pty.write(b"SECRETOVERFLOW")
+    host.pty.write(b"hello")
+    assert await host.collect(lambda o: b"got b'hello'" in o)
+    assert b"SECRET" not in host.output
+    assert "dropping 14 bytes" in caplog.text
+    assert "SECRET" not in caplog.text
+
+
+async def test_kill_gives_up_waiting_if_the_child_is_never_reaped(host, monkeypatch, caplog):
+    host.start("wait")
+    assert await host.collect(lambda o: b"waiting" in o)
+    monkeypatch.setattr(session_host, "HUP_GRACE", 0.1)
+    monkeypatch.setattr(session_host, "TERM_GRACE", 0.2)
+    monkeypatch.setattr(session_host, "REAP_GRACE", 0.2)
+    monkeypatch.setattr(host.pty, "_signal_group", lambda sig: None)
+    before = time.monotonic()
+    await host.pty.kill()
+    assert time.monotonic() - before < 1.5
+    assert "not reaped" in caplog.text
+    assert host.exits == []
+    monkeypatch.undo()
+    await host.pty.kill()
+    assert host.exits == [-signal.SIGHUP]
+
+
+async def test_thread_start_failure_cleans_up_and_raises(host, monkeypatch):
+    started: list[int] = []
+    real_register = session_host._register
+
+    def record(pgid: int) -> None:
+        started.append(pgid)
+        real_register(pgid)
+
+    class BrokenThread:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(session_host, "_register", record)
+    monkeypatch.setattr(session_host.threading, "Thread", BrokenThread)
+    before = fd_count()
+    with pytest.raises(RuntimeError):
+        host.start("wait")
+    assert not host.pty.running
+    assert fd_count() == before
+    assert not host.pid_path.exists()
+    assert started and started[0] not in session_host._live_groups
+    assert await wait_gone(started[0])
+
+
+async def test_pid_file_that_is_a_fifo_is_refused_at_start(host):
+    os.mkfifo(host.pid_path, 0o600)
+    before = fd_count()
+    with pytest.raises(OSError):
+        host.start("wait")
+    assert not host.pty.running
+    assert fd_count() == before
+
+
+def test_reap_stale_refuses_a_fifo_without_blocking(tmp_path):
+    pid_path = tmp_path / "session.pid"
+    os.mkfifo(pid_path, 0o600)
+    before = time.monotonic()
+    assert reap_stale(pid_path) is False
+    assert time.monotonic() - before < 1.0
