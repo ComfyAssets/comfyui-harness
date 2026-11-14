@@ -184,7 +184,7 @@ export function fingerprint(graph, identity) {
 
 // ------------------------------------------------------------ groups
 
-function rectOf(item) {
+export function rectOf(item) {
   const r = item.boundingRect;
   if (r && r.length >= 4) return [r[0], r[1], r[2], r[3]];
   const [x, y] = item.pos ?? [0, 0];
@@ -215,7 +215,7 @@ export function groupMembers(graph) {
 
 // ----------------------------------------------------------- types
 
-function lookupType(types, name) {
+export function lookupType(types, name) {
   if (!types) return null;
   if (typeof types.get === "function") return types.get(name) ?? null;
   return Object.prototype.hasOwnProperty.call(types, name) ? types[name] : null;
@@ -238,7 +238,7 @@ function isSubgraphNode(node) {
 // Missing means the type is not registered. Without a type table nothing is
 // marked missing: has_errors is also set for validation errors, so it says
 // nothing about the type.
-function isMissing(node, types) {
+export function isMissing(node, types) {
   if (!types || isSubgraphNode(node)) return false;
   return lookupType(types, node.type) === null;
 }
