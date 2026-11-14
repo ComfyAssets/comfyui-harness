@@ -25,6 +25,6 @@ browser-test:
 comfyui-test:
 	npm --prefix tools/testing run test:comfyui
 
-# Not in CI: needs a local ComfyUI checkout (COMFYUI_DIR, default ~/comfy/ComfyUI).
+# Not in CI: needs a local ComfyUI checkout (COMFYUI_DIR, default ~/comfy/ComfyUI) and the repo .venv.
 exposure-test:
 	bash tests/comfyui/exposure.sh

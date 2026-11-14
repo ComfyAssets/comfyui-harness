@@ -145,4 +145,4 @@ Delete the `comfyui-harness` directory. To remove the machine key and all pairin
 | `make comfyui-test` | Playwright against a real ComfyUI with a fake CLI (port 8774) | ComfyUI checkout |
 | `make exposure-test` | Starts a real ComfyUI (port 8775, loopback), checks that none of our files or secrets are reachable, normally and with `--enable-cors-header`; `HARNESS_EXPOSURE_WITH_AGENT=1` adds a run with `--enable-agent` | ComfyUI checkout |
 
-`comfyui-test` and `exposure-test` read the checkout from `COMFYUI_DIR` (default `~/comfy/ComfyUI`, with a `venv` inside). They are not in CI, because CI has no ComfyUI checkout. Neither starts the real `claude`. The checks that do use real Claude Code are in [docs/manual-checks.md](docs/manual-checks.md).
+`comfyui-test` and `exposure-test` read the checkout from `COMFYUI_DIR` (default `~/comfy/ComfyUI`, with a `venv` inside). They are not in CI, because CI has no ComfyUI checkout. Neither starts the real `claude`: `comfyui-test` puts a fake CLI first on the server's `PATH`, and `exposure-test` never opens a terminal session. The checks that do use real Claude Code are in [docs/manual-checks.md](docs/manual-checks.md).

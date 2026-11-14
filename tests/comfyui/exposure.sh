@@ -46,18 +46,65 @@ fail() { echo "  FAIL $1" >&2; FAILURES=$((FAILURES + 1)); }
 # status_of <curl args...>: prints the HTTP status only.
 status_of() { curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$@"; }
 
-# expect_refused <name> <curl args...>: the status must not be 200.
+CONTROL_NAME="harness_control.txt"
+CONTROL_TEXT=""
+KEY_HEX=""
+INSTANCE_ID=""
+BODY=""
+
+# fetch <curl args...>: writes the body to $BODY (set in start_server) and prints the HTTP status. 000 means curl failed.
+fetch() {
+  curl -s -o "$BODY" -w '%{http_code}' --max-time 20 "$@" || true
+}
+
+leaks_secret() {
+  [[ -s "$BODY" ]] || return 1
+  grep -qF -e "$KEY_HEX" -e "$INSTANCE_ID" "$BODY"
+}
+
+# expect_refused <name> <curl args...>: a real 4xx answer whose body holds no secret.
+# Status 000 (no answer), 200 and 5xx all fail, so a dead server cannot pass.
 expect_refused() {
-  local name="$1"; shift
+  local name="$1" code; shift
+  code="$(fetch "$@")"
+  if leaks_secret; then fail "$name (body holds secret material, status $code)"; return; fi
+  if [[ "$code" =~ ^4[0-9][0-9]$ ]]; then pass "$name (status $code)"; else fail "$name (status $code)"; fi
+}
+
+# expect_control <name> <curl args...>: 200 and the control file's text.
+expect_control() {
+  local name="$1" code; shift
+  code="$(fetch "$@")"
+  if [[ "$code" == "200" && "$(cat "$BODY")" == "$CONTROL_TEXT" ]]; then
+    pass "control: $name"
+  else
+    fail "control: $name (status $code)"
+  fi
+}
+
+# list_names <curl args...>: prints "<status> <names...>" parsed from a JSON array.
+list_names() {
   local code
-  code="$(status_of "$@")"
-  if [[ "$code" != "200" ]]; then pass "$name (status $code)"; else fail "$name (status 200)"; fi
+  code="$(fetch "$@")"
+  "$PY" -I -c '
+import json, sys
+code, path = sys.argv[1:3]
+try:
+    names = json.load(open(path))
+    assert isinstance(names, list) and all(isinstance(n, str) for n in names)
+except Exception:
+    print(code, "UNPARSEABLE"); sys.exit(0)
+print(code, *names)
+' "$code" "$BODY"
 }
 
 start_server() {
   local label="$1"; shift
   SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/harness-exposure-XXXXXX")"
-  mkdir -p "$SCRATCH/nodes" "$SCRATCH/user" "$SCRATCH/temp"
+  BODY="$SCRATCH/body.out"
+  mkdir -p "$SCRATCH/nodes" "$SCRATCH/user/default" "$SCRATCH/temp"
+  CONTROL_TEXT="control-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+  printf '%s' "$CONTROL_TEXT" >"$SCRATCH/user/default/$CONTROL_NAME"
   ln -s "$REPO" "$SCRATCH/nodes/comfyui-harness"
   printf 'harness_check:\n  base_path: %s\n  custom_nodes: nodes\n' "$SCRATCH" >"$SCRATCH/extra.yaml"
   (
@@ -79,30 +126,57 @@ start_server() {
   echo "ComfyUI did not start ($label)" >&2; tail -n 30 "$SCRATCH/server.log" >&2; exit 1
 }
 
-check_files_not_served() {
+load_secrets() {
   local data="$SCRATCH/user/__harness"
-  [[ -f "$data/key" ]] && pass "key exists on disk" || fail "key exists on disk (the node did not start)"
-  expect_refused "userdata traversal to key" --path-as-is "$BASE/userdata/..%2F__harness%2Fkey"
+  [[ -f "$data/key" && -f "$data/state.json" ]] || { fail "the node did not create key and state.json"; return 1; }
+  KEY_HEX="$(od -An -v -tx1 "$data/key" | tr -d ' \n')"
+  INSTANCE_ID="$("$PY" -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["instance_id"])' "$data/state.json")"
+  if [[ ${#KEY_HEX} -eq 64 && -n "$INSTANCE_ID" ]]; then pass "secret material read (key hex, instance id)"; else fail "secret material unreadable"; return 1; fi
+}
+
+check_files_not_served() {
+  local name listing
+  # Positive controls first: the URL shapes used below do reach files in ComfyUI's
+  # normal user area. Without them a refusal could just be a wrongly shaped URL.
+  expect_control "direct read /userdata/$CONTROL_NAME" "$BASE/userdata/$CONTROL_NAME"
+  expect_control "direct read /api/userdata/$CONTROL_NAME" "$BASE/api/userdata/$CONTROL_NAME"
+  expect_control "traversal form ..%2Fdefault%2F$CONTROL_NAME" --path-as-is "$BASE/userdata/..%2Fdefault%2F$CONTROL_NAME"
+  expect_control "header comfy-user: default" -H "comfy-user: default" "$BASE/userdata/$CONTROL_NAME"
+  # ComfyUI (multi-user off) ignores the header: the default user's file is served for any value.
+  expect_control "header comfy-user: __harness is ignored" -H "comfy-user: __harness" "$BASE/userdata/$CONTROL_NAME"
+
+  # Asked first: later file requests make ComfyUI create an empty default/__harness
+  # directory, after which a listing answers 200 with [] (a different directory).
+  listing="$(list_names "$BASE/api/userdata?dir=__harness")"
+  if [[ "$listing" =~ ^4[0-9][0-9]\  ]]; then
+    pass "listing dir=__harness refused ($listing)"
+  else
+    fail "listing dir=__harness: $listing"
+  fi
+  if leaks_secret; then fail "listing dir=__harness body holds secret material"; fi
+  expect_refused "userdata traversal to key (..%2F__harness%2Fkey)" --path-as-is "$BASE/userdata/..%2F__harness%2Fkey"
   expect_refused "userdata traversal (raw ..) to key" --path-as-is "$BASE/userdata/../__harness/key"
-  local name
+  expect_refused "api userdata traversal to key" --path-as-is "$BASE/api/userdata/..%2F__harness%2Fkey"
   for name in key state.json pair mcp.json; do
     expect_refused "GET /userdata/__harness/$name" "$BASE/userdata/__harness%2F$name"
     expect_refused "GET /api/userdata/__harness/$name" "$BASE/api/userdata/__harness%2F$name"
     expect_refused "comfy-user header, /userdata/$name" -H "comfy-user: __harness" "$BASE/userdata/$name"
     expect_refused "comfy-user header, /api/userdata/$name" -H "comfy-user: __harness" "$BASE/api/userdata/$name"
   done
-  local listing
-  listing="$(curl -s --max-time 20 "$BASE/api/userdata?dir=__harness" || true)"
-  if [[ "$listing" != *key* && "$listing" != *state.json* && "$listing" != *mcp.json* ]]; then
-    pass "userdata listing of __harness shows none of our files"
+
+  # Listings: parsed JSON. The control must be listed (the form works); ours must not.
+  listing="$(list_names "$BASE/api/userdata?dir=.")"
+  if [[ "$listing" == "200 "* && " $listing " == *" $CONTROL_NAME "* ]]; then pass "control: listing dir=. shows $CONTROL_NAME"; else fail "control: listing dir=.: $listing"; fi
+  if [[ " $listing " != *" key "* && " $listing " != *" state.json "* && " $listing " != *" __harness "* ]]; then
+    pass "listing dir=. shows none of our files"
   else
-    fail "userdata listing of __harness: $listing"
+    fail "listing dir=. shows our files: $listing"
   fi
-  listing="$(curl -s --max-time 20 -H "comfy-user: __harness" "$BASE/api/userdata?dir=." || true)"
-  if [[ "$listing" != *state.json* && "$listing" != *mcp.json* ]]; then
-    pass "userdata listing as comfy-user __harness shows none of our files"
+  listing="$(list_names -H "comfy-user: __harness" "$BASE/api/userdata?dir=.")"
+  if [[ "$listing" == "200 "* && " $listing " == *" $CONTROL_NAME "* && " $listing " != *" key "* && " $listing " != *" state.json "* ]]; then
+    pass "listing with comfy-user __harness is the default user's, none of our files"
   else
-    fail "userdata listing as comfy-user __harness: $listing"
+    fail "listing with comfy-user __harness: $listing"
   fi
 }
 
@@ -160,6 +234,7 @@ run_suite() {
   local label="$1"; shift
   echo "== $label =="
   start_server "$label" "$@"
+  load_secrets || return 0
   check_files_not_served
   pair_and_check_logs
   stop_server
