@@ -11,3 +11,24 @@ coverage.xml
 test-results/
 playwright-report/
 .superpowers/
+
+# Agent instructions and tool state (local to each machine)
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+.claude/
+.serena/
+
+# Python caches and build output
+.mypy_cache/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Local environment and editor files
+.env
+*.log
+.vscode/
+.idea/
+.DS_Store

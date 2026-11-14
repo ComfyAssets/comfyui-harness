@@ -1,0 +1,40 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+      - run: npm ci --prefix tools/testing
+      - run: make lint coverage js-test
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+      - run: npm ci --prefix tools/testing
+      - run: npx --prefix tools/testing playwright install --with-deps chromium
+      - run: make browser-test
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-results
+          path: test-results/browser
