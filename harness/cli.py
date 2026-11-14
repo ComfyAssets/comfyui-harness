@@ -161,7 +161,7 @@ class McpEntries:
         return self.comfy or self.canvas
 
 
-def _is_loopback_http(url: str) -> bool:
+def is_loopback_http(url: str) -> bool:
     """Plain http to a loopback host only: the bearer token must never leave the machine."""
     try:
         parts = urlsplit(url)
@@ -205,7 +205,7 @@ def write_mcp_file(
         if comfy is not None:
             env["COMFY_BIN"] = comfy
         servers[MCP_SERVER] = {"command": str(server), "env": env}
-    if canvas_secret is not None and _is_loopback_http(url):
+    if canvas_secret is not None and is_loopback_http(url):
         servers[CANVAS_SERVER] = _canvas_entry(url, canvas_secret)
     entries = McpEntries(comfy=MCP_SERVER in servers, canvas=CANVAS_SERVER in servers)
     if not entries.any:

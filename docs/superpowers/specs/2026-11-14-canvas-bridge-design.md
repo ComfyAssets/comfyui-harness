@@ -500,8 +500,11 @@ agent reads again.
   bridge, exactly as either can hold the terminal today. Like every switch
   in this project they do not restrain the agent itself, which runs as the
   owner's account and can edit the state file; the settings rows say so.
-- Status gains `bridge_enabled`, `bridge_edits`, `bridge_runs` and `bridge_available` (false with a reason
-  when ComfyUI serves TLS itself or the platform is unsupported).
+- Status, for a paired browser only, gains `bridge_enabled`, `bridge_edits`,
+  `bridge_runs`, `bridge_available` and `bridge_reason`. The reason is `""`
+  when available, `"tls"` when ComfyUI serves TLS itself, `"not_loopback"`
+  when ComfyUI listens on a LAN address or host name (the bridge entry is
+  only written for a loopback URL, 6.3), and `"unsupported"` off Linux.
 
 The agent's own permission prompts are untouched: no CLI flag is added, and
 the first use of each `canvas` tool is asked for or allowed by the owner's own

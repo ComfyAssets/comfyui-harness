@@ -986,6 +986,60 @@ async def test_an_abandoned_reply_future_with_an_exception_never_warns() -> None
     assert not [c for c in seen if "never retrieved" in str(c.get("message"))]
 
 
+def test_session_token_is_the_generation_for_the_live_secret_only() -> None:
+    rig = Rig()
+    assert rig.secret is not None
+    token = rig.bridge.session_token(rig.secret)
+    assert token is not None
+    assert rig.bridge.session_token("") is None
+    assert rig.bridge.session_token("0" * 64) is None
+    assert rig.bridge.session_token(None) is None  # type: ignore[arg-type]
+    old = rig.secret
+    rig.bridge.close_session()
+    assert rig.bridge.session_token(old) is None
+    fresh = rig.bridge.open_session()
+    assert fresh is not None
+    assert rig.bridge.session_token(fresh) not in (None, token)
+
+
+async def test_a_call_bound_to_an_old_session_never_reaches_the_page() -> None:
+    rig = Rig()
+    assert rig.secret is not None and rig.sink is not None
+    token = rig.bridge.session_token(rig.secret)
+    rig.bridge.close_session()
+    rig.bridge.open_session()
+    with pytest.raises(ToolError) as err:
+        await rig.bridge.call_tool("get_errors", {}, token=token)
+    assert err.value.message == UNKNOWN
+    assert rig.sink.frames == []
+
+
+async def test_a_call_bound_to_a_session_that_ends_while_queued_fails() -> None:
+    rig = Rig()
+    assert rig.secret is not None and rig.sink is not None
+    first = asyncio.create_task(rig.bridge.call_tool("get_errors", {}))
+    await settle()
+    token = rig.bridge.session_token(rig.secret)
+    second = asyncio.create_task(rig.bridge.call_tool("get_errors", {}, token=token))
+    await settle()
+    rig.bridge.close_session()
+    rig.bridge.open_session()
+    for task in (first, second):
+        with pytest.raises(ToolError):
+            await task
+    assert len(rig.sink.frames) == 1
+
+
+async def test_a_call_bound_to_the_live_session_relays() -> None:
+    rig = Rig()
+    assert rig.secret is not None and rig.sink is not None
+    token = rig.bridge.session_token(rig.secret)
+    task = asyncio.create_task(rig.bridge.call_tool("get_errors", {}, token=token))
+    await settle()
+    rig.bridge.reply(rig.sink, ok(rig.sink.frames[0], {"fine": True}))
+    assert await task == {"fine": True}
+
+
 async def test_a_cancelled_reply_future_is_harmless() -> None:
     future = Rig().bridge._new_future()
     future.cancel()

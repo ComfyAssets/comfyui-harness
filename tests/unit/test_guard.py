@@ -11,6 +11,7 @@ from harness.guard import (
     is_secure_origin,
     refusal_response,
     require_paired,
+    require_session_agent,
 )
 from harness.store import Browser
 
@@ -161,3 +162,102 @@ def test_refusal_unknown_code_raises_key_error():
 def test_tables_match_spec():
     assert STATUS["unsupported_platform"] == 501
     assert WS_CLOSE == {"not_paired": 4401, "bad_origin": 4403, "disabled": 4409}
+
+
+# ---------------------------------------------------------------------------
+# The session's agent (canvas bridge spec 6.2)
+
+SECRET = "ab" * 32
+GOOD = {"Authorization": "Bearer " + SECRET}
+
+
+def agent_req(headers):
+    return make_mocked_request("POST", "/harness/mcp", headers=headers)
+
+
+def matches(token):
+    return token == SECRET
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"Origin": "http://127.0.0.1:8188"},
+        {"Origin": ""},
+        {"Cookie": "a=b"},
+        {"Cookie": ""},
+        {"Sec-Fetch-Site": "same-origin"},
+        {"Sec-Fetch-Site": "none"},
+        {"Sec-Fetch-Site": ""},
+    ],
+)
+def test_any_browser_header_refuses_even_with_the_right_secret(extra):
+    with pytest.raises(Refusal) as e:
+        require_session_agent(agent_req({**GOOD, **extra}), matches)
+    assert e.value.code == "bridge_refused"
+
+
+@pytest.mark.parametrize(
+    "auth",
+    [
+        None,
+        "",
+        "Bearer",
+        "Bearer ",
+        "Basic abc",
+        "bearer " + SECRET,
+        "BEARER " + SECRET,
+        "bearer " + SECRET + "x",
+        "Bearer  " + SECRET,
+        "Bearer " + SECRET + " ",
+        "Bearer " + SECRET + "x",
+        SECRET,
+    ],
+)
+def test_a_missing_or_wrong_authorization_refuses(auth):
+    headers = {} if auth is None else {"Authorization": auth}
+    with pytest.raises(Refusal) as e:
+        require_session_agent(agent_req(headers), matches)
+    assert e.value.code == "bridge_refused"
+
+
+def test_two_authorization_headers_refuse():
+    from multidict import CIMultiDict
+
+    headers = CIMultiDict([("Authorization", "Bearer " + SECRET), ("Authorization", "Bearer x")])
+    with pytest.raises(Refusal):
+        require_session_agent(agent_req(headers), matches)
+
+
+def test_the_right_secret_and_no_browser_header_passes():
+    assert require_session_agent(agent_req(GOOD), matches) is None
+
+
+def test_a_matcher_that_raises_refuses():
+    def boom(_token):
+        raise RuntimeError("broken")
+
+    with pytest.raises(Refusal) as e:
+        require_session_agent(agent_req(GOOD), boom)
+    assert e.value.code == "bridge_refused"
+
+
+def test_the_refusal_is_403_bridge_refused_with_no_message():
+    with pytest.raises(Refusal) as e:
+        require_session_agent(agent_req({}), matches)
+    assert e.value.status == 403
+    assert STATUS["bridge_refused"] == 403
+    response = refusal_response(e.value)
+    assert response.status == 403
+    assert json.loads(response.body) == {"error": {"code": "bridge_refused", "message": ""}}
+
+
+def test_every_refusal_reads_the_same():
+    """The body never says which check failed."""
+    cases = [{}, {**GOOD, "Origin": "x"}, {"Authorization": "Bearer nope"}, {"Authorization": "x"}]
+    bodies = set()
+    for headers in cases:
+        with pytest.raises(Refusal) as e:
+            require_session_agent(agent_req(headers), matches)
+        bodies.add(refusal_response(e.value).body)
+    assert len(bodies) == 1

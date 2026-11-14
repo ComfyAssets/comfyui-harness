@@ -1,6 +1,8 @@
-"""HTTP routes: status, pairing, the enabled switch and the terminal WebSocket.
+"""HTTP routes: status, pairing, the switches, the terminal WebSocket and the
+canvas bridge's MCP endpoint.
 
-Nothing secret is logged here: not cookies, poll secrets, header values or bodies.
+Nothing secret is logged here: not cookies, poll secrets, bearer tokens, header
+values or bodies.
 """
 
 import asyncio
@@ -12,16 +14,20 @@ import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
+from urllib.parse import urlsplit
 
 from aiohttp import web
 
-from . import cli
+from . import cli, mcp
+from .bridge import TOOLS, Bridge
 from .guard import (
     Refusal,
+    agent_credential,
     classify,
     is_secure_origin,
     refusal_response,
     require_paired,
+    require_session_agent,
 )
 from .pairing import COOKIE_MAX, Pairing
 from .session import SessionManager
@@ -36,6 +42,12 @@ DEFAULT_DATA_DIR_NAME = "__harness"
 HTTPS_HELP = (
     "Pairing needs HTTPS or a loopback address. Start ComfyUI with --tls-keyfile and "
     "--tls-certfile, or put a TLS proxy in front of it."
+)
+# The bridge's server-state switches: route path -> State field and log label.
+BRIDGE_SWITCHES = (
+    ("/bridge", "bridge_enabled", "canvas bridge"),
+    ("/bridge/edits", "bridge_edits", "canvas bridge edits"),
+    ("/bridge/runs", "bridge_runs", "canvas bridge runs"),
 )
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
@@ -53,6 +65,7 @@ class Deps:
     cli_status: Callable[[], dict]
     clock: Callable[[], float] = time.time
     terminal: Optional[Terminal] = None
+    bridge: Optional[Bridge] = None
 
 
 class _RefusalLog:
@@ -131,6 +144,73 @@ async def _enabled_flag(request: web.Request) -> bool:
     return body["enabled"]
 
 
+async def _read_capped(request: web.Request, cap: int) -> bytes:
+    """At most `cap` bytes of the body. Never reads past the cap, never `read()`s it all."""
+    chunks: list[bytes] = []
+    size = 0
+    while size < cap:
+        chunk = await request.content.read(cap - size)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
+
+
+def _bridge_reason(deps: Deps) -> str:
+    """Why the bridge cannot work here, or "" when it can (canvas bridge spec 6.3, 9)."""
+    if not deps.supported or deps.bridge is None:
+        return "unsupported"
+    url = deps.comfy_url()
+    try:
+        scheme = urlsplit(url).scheme
+    except ValueError:
+        return "not_loopback"
+    if scheme == "https":
+        return "tls"
+    if not cli.is_loopback_http(url):
+        return "not_loopback"
+    return ""
+
+
+def _bridge_status(deps: Deps, store: Store) -> dict:
+    state = store.state
+    reason = _bridge_reason(deps)
+    return {
+        "bridge_enabled": state.bridge_enabled,
+        "bridge_edits": state.bridge_edits,
+        "bridge_runs": state.bridge_runs,
+        "bridge_available": reason == "",
+        "bridge_reason": reason,
+    }
+
+
+def _mcp_response(reply: mcp.Reply) -> web.Response:
+    if reply.body is None:
+        return web.Response(status=reply.status)
+    return web.json_response(reply.body, status=reply.status)
+
+
+async def _serve_mcp(request: web.Request, bridge: Optional[Bridge]) -> web.Response:
+    """One MCP request from the session's agent (canvas bridge spec 6.1, 6.2)."""
+    if bridge is None:
+        raise Refusal("bridge_refused")
+    # Early check, so a stranger's body is never read.
+    require_session_agent(request, bridge.secret_matches)
+    raw = await _read_capped(request, mcp.MAX_BODY + 1)
+    # Checked again after the body, and bound to the session live now: a session that
+    # restarted while the body arrived refuses here, and one that restarts while the
+    # call waits makes the bridge refuse the call.
+    token = bridge.session_token(agent_credential(request))
+    if token is None:
+        raise Refusal("bridge_refused")
+
+    async def call(name: str, args: dict) -> dict:
+        return await bridge.call_tool(name, args, token)
+
+    return _mcp_response(await mcp.handle(raw, TOOLS, call))
+
+
 def _terminal(deps: Deps) -> Terminal:
     """One Terminal per Deps, shared by every prefix the routes are set up under."""
     if deps.terminal is None:
@@ -174,6 +254,7 @@ def setup(routes: web.RouteTableDef, deps: Deps, prefix: str = "/harness") -> No
             body["session"] = None if deps.sessions is None else deps.sessions.info()
             # The page compares this with its own address; the socket refuses others.
             body["origin"] = browser.origin
+            body.update(_bridge_status(deps, store()))
         return web.json_response(body)
 
     @route("POST", "/pair/request")
@@ -236,6 +317,42 @@ def setup(routes: web.RouteTableDef, deps: Deps, prefix: str = "/harness") -> No
             await terminal.disable()
         return web.Response(status=204)
 
+    def bridge_switch(path: str, field: str, label: str) -> None:
+        @route("PUT", path)
+        async def switch(request: web.Request) -> web.StreamResponse:
+            paired(request)
+            value = await _enabled_flag(request)
+            change: dict[str, Any] = {field: value}
+            try:
+                store().update(lambda state: replace(state, **change))
+            finally:
+                # No await from the state change to here: the secret goes at once.
+                # Turning the bridge off clears it even if the write failed.
+                if field == "bridge_enabled" and not value and deps.bridge is not None:
+                    deps.bridge.switched_off()
+            log.info("%s %s", label, "on" if value else "off")
+            return web.Response(status=204)
+
+    for path, field, label in BRIDGE_SWITCHES:
+        bridge_switch(path, field, label)
+
+    @route("POST", "/mcp")
+    async def mcp_endpoint(request: web.Request) -> web.StreamResponse:
+        try:
+            return await _serve_mcp(request, deps.bridge)
+        except Refusal:
+            raise
+        except Exception as error:  # noqa: BLE001 - log the type only, never its text
+            log.error("canvas bridge request failed: %s", type(error).__name__)
+            return web.Response(status=500)
+
+    async def mcp_not_allowed(_request: web.Request) -> web.StreamResponse:
+        # Stateless transport: the server never opens a stream or keeps a session id.
+        return web.Response(status=405, headers={"Allow": "POST"})
+
+    route("GET", "/mcp")(mcp_not_allowed)
+    route("DELETE", "/mcp")(mcp_not_allowed)
+
     @route("GET", "/terminal/ws")
     async def terminal_ws(request: web.Request) -> web.StreamResponse:
         browser = paired(request)
@@ -252,7 +369,12 @@ def _supported() -> bool:
     return sys.platform == "linux"
 
 
-def _session_manager(store: Store, cwd: Path, comfy_url: Callable[[], str]) -> SessionManager:
+def _session_manager(
+    store: Store,
+    cwd: Path,
+    comfy_url: Callable[[], str],
+    bridge: Optional[Bridge] = None,
+) -> SessionManager:
     """Linux only: session_host imports fcntl, pty and termios."""
     from .session_host import PtySessionHost, reap_stale
 
@@ -262,7 +384,24 @@ def _session_manager(store: Store, cwd: Path, comfy_url: Callable[[], str]) -> S
         store=store,
         cwd=cwd,
         comfy_url=comfy_url,
+        bridge=bridge,
     )
+
+
+def _build_bridge(deps: Deps, store: Store, folder_paths: Any) -> Bridge:
+    """The bridge sends to the page holding the session; output dirs are read per call."""
+
+    def attached() -> Any:
+        return deps.sessions.sink if deps.sessions is not None else None
+
+    def output_dirs() -> dict[str, Path]:
+        return {
+            "output": Path(folder_paths.get_output_directory()),
+            "temp": Path(folder_paths.get_temp_directory()),
+            "input": Path(folder_paths.get_input_directory()),
+        }
+
+    return Bridge(store, attached, output_dirs)
 
 
 def watch_app(app: web.Application, deps: Deps) -> None:
@@ -305,7 +444,10 @@ def install(prompt_server: Any) -> Deps:
         cli_status=cli.status,
     )
     if supported and store is not None:
-        deps.sessions = _session_manager(store, Path(folder_paths.base_path), deps.comfy_url)
+        deps.bridge = _build_bridge(deps, store, folder_paths)
+        deps.sessions = _session_manager(
+            store, Path(folder_paths.base_path), deps.comfy_url, deps.bridge
+        )
     setup(prompt_server.routes, deps)
     watch_app(prompt_server.app, deps)
     return deps

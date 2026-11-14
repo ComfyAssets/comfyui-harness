@@ -19,11 +19,15 @@ STATUS = {
     "bad_state": 500,
     "not_found": 404,
     "bad_request": 400,
+    "bridge_refused": 403,
 }
 WS_CLOSE = {"not_paired": 4401, "bad_origin": 4403, "disabled": 4409}
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 READ_METHODS = frozenset({"GET", "HEAD"})
+# A browser sends at least one of these on every POST; the session's agent sends none.
+BROWSER_HEADERS = ("Origin", "Cookie", "Sec-Fetch-Site")
+BEARER = "Bearer "
 
 Lookup = Callable[[str], Optional[Browser]]
 
@@ -104,3 +108,32 @@ def require_paired(request: web.Request, cookie_name: str, lookup: Lookup) -> Br
             f"This browser was paired from {browser.origin}. " "Open ComfyUI from that address.",
         )
     return browser
+
+
+def agent_credential(request: web.Request) -> str:
+    """The bearer token of a caller that may be the session's agent.
+
+    Checks everything except the secret itself. Every refusal is the same
+    `bridge_refused` with no message, so a caller never learns which check failed.
+    """
+    headers = request.headers
+    if any(name in headers for name in BROWSER_HEADERS):
+        raise Refusal("bridge_refused")
+    values = headers.getall("Authorization", [])
+    if len(values) != 1 or not values[0].startswith(BEARER):
+        raise Refusal("bridge_refused")
+    token = values[0].removeprefix(BEARER)
+    if not token or token != token.strip() or " " in token:
+        raise Refusal("bridge_refused")
+    return token
+
+
+def require_session_agent(request: web.Request, matches: Callable[[str], bool]) -> None:
+    """Refuse unless the caller is the session's agent (canvas bridge spec 6.2)."""
+    token = agent_credential(request)
+    try:
+        ok = matches(token)
+    except Exception:  # noqa: BLE001 - a broken matcher refuses, never admits
+        ok = False
+    if ok is not True:
+        raise Refusal("bridge_refused")

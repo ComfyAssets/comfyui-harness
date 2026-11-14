@@ -362,6 +362,14 @@ class Bridge:
             return False
         return hmac.compare_digest(secret.encode(), candidate.encode("utf-8", "replace"))
 
+    def session_token(self, candidate: str) -> Optional[int]:
+        """The live session's generation if `candidate` is its secret, else None.
+
+        Pass the token to `call_tool` with no `await` in between: the call then runs
+        only in the session whose secret was checked, never in one started since.
+        """
+        return self._generation if self.secret_matches(candidate) else None
+
     def _end(self) -> None:
         self._secret = None
         self._generation += 1
@@ -406,12 +414,16 @@ class Bridge:
         if name == "run" and not state.bridge_runs:
             raise ToolError(RUNS_OFF)
 
-    async def call_tool(self, name: str, args: dict) -> dict:
-        """The mcp.ToolCall: relay one schema-valid call to the page and wait."""
+    async def call_tool(self, name: str, args: dict, token: Optional[int] = None) -> dict:
+        """The mcp.ToolCall: relay one schema-valid call to the page and wait.
+
+        `token` from `session_token` binds the call to that session; without one the
+        call binds to the session live when it starts.
+        """
         started = time.monotonic()
         outcome = "failed"
         try:
-            result = await self._call(name, args)
+            result = await self._call(name, args, token)
             outcome = "ok"
             return result
         except ToolError as err:
@@ -421,13 +433,15 @@ class Bridge:
             took = time.monotonic() - started
             log.info("bridge %s %s in %.2fs", name, outcome, took)
 
-    async def _call(self, name: str, args: dict) -> dict:
+    async def _call(self, name: str, args: dict, token: Optional[int]) -> dict:
+        generation = self._generation if token is None else token
+        if generation != self._generation:
+            raise ToolError(UNKNOWN)
         self._check_switches(name)
         if self._pending >= QUEUE_LIMIT:
             raise ToolError(BUSY)
         if name == "get_node_types" and (("types" in args) == ("search" in args)):
             raise ToolError(TYPES_OR_SEARCH)
-        generation = self._generation
         self._pending += 1
         try:
             async with self._lock:
