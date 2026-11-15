@@ -489,3 +489,14 @@ def test_comfy_url_for_listen_values(listen, expected):
     from harness.cli import comfy_url
 
     assert comfy_url(listen, 8188, False) == expected
+
+
+def test_mcp_servers_returns_entries_and_writes_nothing(tmp_path):
+    from harness.cli import mcp_servers
+
+    server = on_path(tmp_path)
+    servers = mcp_servers(URL, which={}.get, canvas_secret="s", **lookup(tmp_path))
+    assert servers["comfy-mcp"] == {"command": str(server), "env": {"COMFYUI_URL": URL}}
+    assert set(servers) == {"comfy-mcp", "canvas"}
+    assert servers["canvas"]["headers"] == {"Authorization": "Bearer s"}
+    assert list(tmp_path.glob("**/mcp.json")) == []

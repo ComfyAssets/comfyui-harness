@@ -277,15 +277,15 @@ def _canvas_entry(url: str, secret: str) -> dict:
     }
 
 
-def write_mcp_file(
-    mcp_path: Path,
+def mcp_servers(
     url: str,
     which: Which = shutil.which,
     python: Optional[str] = None,
     path: Optional[str] = None,
     home: Optional[Path] = None,
     canvas_secret: Optional[str] = None,
-) -> McpEntries:
+) -> dict[str, dict]:
+    """The session's MCP server entries (Claude's shape); writes nothing."""
     if python is None:
         python = sys.executable
     servers: dict[str, dict] = {}
@@ -298,6 +298,12 @@ def write_mcp_file(
         servers[MCP_SERVER] = {"command": str(server), "env": env}
     if canvas_secret is not None and is_loopback_http(url):
         servers[CANVAS_SERVER] = _canvas_entry(url, canvas_secret)
+    return servers
+
+
+def write_mcp_file(mcp_path: Path, url: str, **lookup) -> McpEntries:
+    """Claude's per-session file; the session moves to launch.plan_launch in a later task."""
+    servers = mcp_servers(url, **lookup)
     entries = McpEntries(comfy=MCP_SERVER in servers, canvas=CANVAS_SERVER in servers)
     if not entries.any:
         try:
