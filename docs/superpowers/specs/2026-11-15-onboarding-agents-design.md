@@ -207,8 +207,9 @@ argv, env and files. A note to carry:
 - `SessionManager` takes the folder from the choice instead of the fixed
   `cwd`. If the folder has gone since setup, the session does not start and
   the panel says so (below).
-- `build_argv` and the env builder take the agent's MCP mechanism and
-  resume form from its table entry.
+- `launch.plan_launch` and the env builder take the agent's MCP mechanism
+  and resume form from its table entry (`cli.mcp_servers` gives the
+  entries; the session writes the planned files).
 
 ### 6. Status and the panel
 

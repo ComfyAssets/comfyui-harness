@@ -43,7 +43,7 @@ def fake_find(cli_id):
 
 def save_choice(store, agent, folder):
     body = json.dumps({"agent": agent, "folder": str(folder)}).encode()
-    cli_mod._write_private_atomically(store.data_dir / "agent.json", body)
+    store.write_private("agent.json", body)
 
 
 @pytest.fixture

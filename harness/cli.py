@@ -5,9 +5,7 @@ fixed table below. This module starts no processes.
 """
 
 import ipaddress
-import json
 import os
-import secrets
 import shutil
 import sys
 from dataclasses import dataclass
@@ -209,36 +207,6 @@ def _comfy_bin(which: Which, python: str) -> Optional[str]:
     return which("comfy")
 
 
-def _write_private_atomically(target: Path, data: bytes) -> None:
-    temp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-    fd = os.open(temp, flags, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, target)
-    except BaseException:
-        try:
-            os.unlink(temp)
-        except FileNotFoundError:
-            pass
-        raise
-
-
-@dataclass(frozen=True)
-class McpEntries:
-    """Which servers the per-session MCP file holds."""
-
-    comfy: bool
-    canvas: bool
-
-    @property
-    def any(self) -> bool:
-        return self.comfy or self.canvas
-
-
 def is_loopback_http(url: str) -> bool:
     """Plain http to a loopback host only: the bearer token must never leave the machine."""
     try:
@@ -286,29 +254,6 @@ def mcp_servers(
     if canvas_secret is not None and is_loopback_http(url):
         servers[CANVAS_SERVER] = _canvas_entry(url, canvas_secret)
     return servers
-
-
-def write_mcp_file(mcp_path: Path, url: str, **lookup) -> McpEntries:
-    """Claude's per-session file; the session moves to launch.plan_launch in a later task."""
-    servers = mcp_servers(url, **lookup)
-    entries = McpEntries(comfy=MCP_SERVER in servers, canvas=CANVAS_SERVER in servers)
-    if not entries.any:
-        try:
-            os.unlink(mcp_path)
-        except FileNotFoundError:
-            pass
-        return entries
-    _write_private_atomically(mcp_path, json.dumps({"mcpServers": servers}, indent=2).encode())
-    return entries
-
-
-def build_argv(cli: Cli, exe: Path, mcp_path: Optional[Path], resume: bool) -> list[str]:
-    argv = [str(exe), *cli.args]
-    if mcp_path is not None:
-        argv += ["--mcp-config", str(mcp_path)]
-    if resume:
-        argv += [*cli.resume_args]
-    return argv
 
 
 def _has_utf8(value: str) -> bool:

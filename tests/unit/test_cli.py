@@ -1,6 +1,4 @@
-import json
 import os
-import stat
 import sys
 from pathlib import Path
 
@@ -13,14 +11,12 @@ from harness.cli import (
     CLIS,
     FORBIDDEN,
     CliNotFound,
-    build_argv,
     build_env,
     find,
     comfy_url,
     find_mcp_server,
     status,
-    McpEntries,
-    write_mcp_file,
+    mcp_servers,
 )
 
 
@@ -33,9 +29,6 @@ def make_exe(path: Path, mode: int = 0o755) -> Path:
 
 def test_no_cli_argument_list_weakens_permissions():
     for cli in CLIS.values():
-        for resume in (False, True):
-            argv = build_argv(cli, Path("/x/claude"), Path("/d/mcp.json"), resume)
-            assert not set(argv) & set(cli.forbidden)
         assert not set(cli.args) & set(cli.forbidden)
         assert not set(cli.resume_args) & set(cli.forbidden)
         assert set(cli.forbidden) <= set(FORBIDDEN)
@@ -76,23 +69,6 @@ def test_resume_forms():
 )
 def test_every_agent_forbids_its_prompt_skipping_flags(agent, flags):
     assert set(flags) <= set(CLIS[agent].forbidden)
-
-
-def test_argv_with_mcp_and_resume():
-    assert build_argv(CLIS["claude"], Path("/x/claude"), Path("/d/mcp.json"), True) == [
-        "/x/claude",
-        "--mcp-config",
-        "/d/mcp.json",
-        "--continue",
-    ]
-
-
-def test_argv_without_mcp_file_omits_the_flag():
-    assert build_argv(CLIS["claude"], Path("/x/claude"), None, False) == ["/x/claude"]
-    assert build_argv(CLIS["claude"], Path("/x/claude"), None, True) == [
-        "/x/claude",
-        "--continue",
-    ]
 
 
 def test_find_prefers_path_then_local_bin(tmp_path):
@@ -168,7 +144,7 @@ URL = "http://127.0.0.1:8188"
 
 
 def lookup(tmp_path: Path, python: str = "") -> dict:
-    """Where write_mcp_file and status look: a fake PATH, home and server Python."""
+    """Where mcp_servers and status look: a fake PATH, home and server Python."""
     return {
         "path": str(tmp_path / "pathbin"),
         "home": tmp_path / "home",
@@ -180,24 +156,22 @@ def on_path(tmp_path: Path) -> Path:
     return make_exe(tmp_path / "pathbin" / "comfy-mcp")
 
 
-def mcp_env(tmp_path: Path) -> dict:
-    return json.loads((tmp_path / "mcp.json").read_text())["mcpServers"]["comfy-mcp"]["env"]
+def mcp_env(tmp_path: Path, url: str = URL, which=None) -> dict:
+    which = which or {"comfy": "/b/comfy"}.get
+    return mcp_servers(url, which=which, **lookup(tmp_path))["comfy-mcp"]["env"]
 
 
-def test_mcp_file_contents(tmp_path):
+def test_mcp_server_entries(tmp_path):
     server = on_path(tmp_path)
-    ok = write_mcp_file(
-        tmp_path / "mcp.json",
+    servers = mcp_servers(
         URL,
         which={"comfy": "/b/comfy"}.get,
         **lookup(tmp_path, python="/venv/bin/python"),
     )
-    assert ok.comfy and json.loads((tmp_path / "mcp.json").read_text()) == {
-        "mcpServers": {
-            "comfy-mcp": {
-                "command": str(server),
-                "env": {"COMFYUI_URL": URL, "COMFY_BIN": "/b/comfy"},
-            }
+    assert servers == {
+        "comfy-mcp": {
+            "command": str(server),
+            "env": {"COMFYUI_URL": URL, "COMFY_BIN": "/b/comfy"},
         }
     }
 
@@ -207,8 +181,7 @@ def test_comfy_mcp_next_to_the_servers_python_comes_first(tmp_path):
     make_exe(tmp_path / "home" / ".local" / "bin" / "comfy-mcp")
     beside = make_exe(tmp_path / "venv" / "bin" / "comfy-mcp")
     assert find_mcp_server(**lookup(tmp_path)) == beside
-    assert write_mcp_file(tmp_path / "mcp.json", URL, which={}.get, **lookup(tmp_path))
-    command = json.loads((tmp_path / "mcp.json").read_text())["mcpServers"]["comfy-mcp"]
+    command = mcp_servers(URL, which={}.get, **lookup(tmp_path))["comfy-mcp"]
     assert command["command"] == str(beside)
 
 
@@ -243,64 +216,23 @@ def test_comfy_mcp_lookup_defaults_to_the_servers_python(tmp_path, monkeypatch):
 def test_comfy_next_to_the_servers_python_is_preferred(tmp_path):
     on_path(tmp_path)
     comfy = make_exe(tmp_path / "venv" / "bin" / "comfy")
-    write_mcp_file(tmp_path / "mcp.json", URL, which={"comfy": "/b/comfy"}.get, **lookup(tmp_path))
     assert mcp_env(tmp_path)["COMFY_BIN"] == str(comfy)
 
 
 def test_non_executable_comfy_next_to_python_falls_back_to_path(tmp_path):
     on_path(tmp_path)
     make_exe(tmp_path / "venv" / "bin" / "comfy", 0o644)
-    write_mcp_file(tmp_path / "mcp.json", URL, which={"comfy": "/b/comfy"}.get, **lookup(tmp_path))
     assert mcp_env(tmp_path)["COMFY_BIN"] == "/b/comfy"
 
 
 def test_comfy_bin_is_omitted_when_comfy_is_nowhere(tmp_path):
     on_path(tmp_path)
-    write_mcp_file(tmp_path / "mcp.json", "https://10.0.0.5:9000", which={}.get, **lookup(tmp_path))
-    assert mcp_env(tmp_path) == {"COMFYUI_URL": "https://10.0.0.5:9000"}
+    env = mcp_env(tmp_path, "https://10.0.0.5:9000", {}.get)
+    assert env == {"COMFYUI_URL": "https://10.0.0.5:9000"}
 
 
-def test_mcp_file_is_not_written_when_comfy_mcp_is_missing(tmp_path):
-    assert write_mcp_file(
-        tmp_path / "mcp.json", URL, which={}.get, **lookup(tmp_path)
-    ) == McpEntries(False, False)
-    assert not (tmp_path / "mcp.json").exists()
-
-
-def test_stale_mcp_file_is_removed_when_comfy_mcp_is_missing(tmp_path):
-    (tmp_path / "mcp.json").write_text("{}")
-    assert write_mcp_file(
-        tmp_path / "mcp.json", URL, which={}.get, **lookup(tmp_path)
-    ) == McpEntries(False, False)
-    assert not (tmp_path / "mcp.json").exists()
-
-
-def test_mcp_file_is_owner_only(tmp_path):
-    on_path(tmp_path)
-    write_mcp_file(tmp_path / "mcp.json", URL, which={}.get, **lookup(tmp_path))
-    assert stat.S_IMODE((tmp_path / "mcp.json").stat().st_mode) == 0o600
-
-
-def test_mcp_file_replaces_an_existing_file_and_leaves_no_temp_files(tmp_path):
-    on_path(tmp_path)
-    target = tmp_path / "out" / "mcp.json"
-    target.parent.mkdir()
-    target.write_text("old")
-    assert write_mcp_file(target, "http://127.0.0.1:1", which={}.get, **lookup(tmp_path))
-    assert "127.0.0.1:1" in target.read_text()
-    assert [p.name for p in target.parent.iterdir()] == ["mcp.json"]
-
-
-def test_mcp_file_write_does_not_follow_a_symlink_at_the_target(tmp_path):
-    on_path(tmp_path)
-    victim = tmp_path / "victim"
-    victim.write_text("keep")
-    target = tmp_path / "mcp.json"
-    target.symlink_to(victim)
-    assert write_mcp_file(target, URL, which={}.get, **lookup(tmp_path))
-    assert victim.read_text() == "keep"
-    assert not target.is_symlink()
-    assert json.loads(target.read_text())["mcpServers"]
+def test_no_entries_when_comfy_mcp_is_missing(tmp_path):
+    assert mcp_servers(URL, which={}.get, **lookup(tmp_path)) == {}
 
 
 @pytest.mark.parametrize(
@@ -476,72 +408,31 @@ def test_pair_script_is_the_absolute_path_beside_the_harness_package(tmp_path):
     assert Path(body["pair_script"]).is_absolute()
 
 
-def test_failed_replace_removes_the_temp_file_and_raises(tmp_path, monkeypatch):
-    def boom(src, dst):
-        raise OSError("disk gone")
-
-    monkeypatch.setattr(os, "replace", boom)
-    on_path(tmp_path)
-    (tmp_path / "out").mkdir()
-    with pytest.raises(OSError):
-        write_mcp_file(tmp_path / "out" / "mcp.json", URL, which={}.get, **lookup(tmp_path))
-    assert list((tmp_path / "out").iterdir()) == []
-
-
 SECRET = "ab" * 32
 
 
-def read_config(tmp_path: Path) -> dict:
-    return json.loads((tmp_path / "mcp.json").read_text())["mcpServers"]
+def servers_at(tmp_path: Path, url: str) -> dict:
+    return mcp_servers(url, which={}.get, canvas_secret=SECRET, **lookup(tmp_path))
 
 
 def test_the_canvas_entry_is_http_with_a_bearer_header(tmp_path):
     on_path(tmp_path)
-    got = write_mcp_file(
-        tmp_path / "mcp.json", URL + "/", which={}.get, canvas_secret=SECRET, **lookup(tmp_path)
-    )
-    assert got == McpEntries(comfy=True, canvas=True) and got.any
-    assert read_config(tmp_path)["canvas"] == {
+    servers = servers_at(tmp_path, URL + "/")
+    assert list(servers) == ["comfy-mcp", "canvas"]
+    assert servers["canvas"] == {
         "type": "http",
         "url": URL + "/harness/mcp",
         "headers": {"Authorization": "Bearer " + SECRET},
     }
-    assert "comfy-mcp" in read_config(tmp_path)
 
 
-def test_the_file_has_only_canvas_when_comfy_mcp_is_missing(tmp_path):
-    got = write_mcp_file(
-        tmp_path / "mcp.json", URL, which={}.get, canvas_secret=SECRET, **lookup(tmp_path)
-    )
-    assert got == McpEntries(comfy=False, canvas=True)
-    assert list(read_config(tmp_path)) == ["canvas"]
-
-
-def test_the_file_is_removed_when_neither_entry_applies(tmp_path):
-    (tmp_path / "mcp.json").write_text("{}")
-    got = write_mcp_file(tmp_path / "mcp.json", URL, which={}.get, **lookup(tmp_path))
-    assert got == McpEntries(comfy=False, canvas=False) and not got.any
-    assert not (tmp_path / "mcp.json").exists()
+def test_only_canvas_when_comfy_mcp_is_missing(tmp_path):
+    assert list(servers_at(tmp_path, URL)) == ["canvas"]
 
 
 def test_no_canvas_entry_when_comfyui_serves_tls(tmp_path):
     on_path(tmp_path)
-    got = write_mcp_file(
-        tmp_path / "mcp.json",
-        "https://127.0.0.1:8188",
-        which={}.get,
-        canvas_secret=SECRET,
-        **lookup(tmp_path),
-    )
-    assert got == McpEntries(comfy=True, canvas=False)
-    assert "canvas" not in read_config(tmp_path)
-
-
-def test_the_file_is_still_owner_only(tmp_path):
-    write_mcp_file(
-        tmp_path / "mcp.json", URL, which={}.get, canvas_secret=SECRET, **lookup(tmp_path)
-    )
-    assert stat.S_IMODE((tmp_path / "mcp.json").stat().st_mode) == 0o600
+    assert list(servers_at(tmp_path, "https://127.0.0.1:8188")) == ["comfy-mcp"]
 
 
 @pytest.mark.parametrize(
@@ -553,11 +444,8 @@ def test_the_file_is_still_owner_only(tmp_path):
         "http://[::1]:8188",
     ],
 )
-def test_the_canvas_entry_is_written_for_loopback_urls(tmp_path, url):
-    got = write_mcp_file(
-        tmp_path / "mcp.json", url, which={}.get, canvas_secret=SECRET, **lookup(tmp_path)
-    )
-    assert got.canvas
+def test_the_canvas_entry_is_given_for_loopback_urls(tmp_path, url):
+    assert "canvas" in servers_at(tmp_path, url)
 
 
 @pytest.mark.parametrize(
@@ -572,11 +460,7 @@ def test_the_canvas_entry_is_written_for_loopback_urls(tmp_path, url):
     ],
 )
 def test_no_canvas_entry_for_non_loopback_urls(tmp_path, url):
-    got = write_mcp_file(
-        tmp_path / "mcp.json", url, which={}.get, canvas_secret=SECRET, **lookup(tmp_path)
-    )
-    assert not got.canvas
-    assert not (tmp_path / "mcp.json").exists()
+    assert servers_at(tmp_path, url) == {}
 
 
 @pytest.mark.parametrize(
@@ -596,8 +480,6 @@ def test_comfy_url_for_listen_values(listen, expected):
 
 
 def test_mcp_servers_returns_entries_and_writes_nothing(tmp_path):
-    from harness.cli import mcp_servers
-
     server = on_path(tmp_path)
     servers = mcp_servers(URL, which={}.get, canvas_secret="s", **lookup(tmp_path))
     assert servers["comfy-mcp"] == {"command": str(server), "env": {"COMFYUI_URL": URL}}

@@ -57,7 +57,7 @@ def servers_for(url, canvas_secret=None, **lookup):
 
 def save_choice(store, agent, folder):
     body = json.dumps({"agent": agent, "folder": str(folder)}).encode()
-    cli_mod._write_private_atomically(store.data_dir / "agent.json", body)
+    store.write_private("agent.json", body)
 
 
 @pytest.fixture
@@ -801,24 +801,6 @@ def test_opencode_gets_its_servers_in_the_environment(bmgr, host, store, project
     )
     for key, value in expected.env.items():
         assert host.started.env[key] == value
-
-
-def test_claude_mcp_file_is_byte_identical_to_the_old_writer(store, tmp_path, monkeypatch):
-    monkeypatch.undo()  # the real mcp_servers and find_mcp_server lookups
-    bin_dir = tmp_path / "bin"
-    make_agent(bin_dir, "comfy-mcp")
-    make_agent(bin_dir, "comfy")
-    lookup = {
-        "python": str(tmp_path / "py" / "python"),
-        "path": str(bin_dir),
-        "home": tmp_path,
-        "which": lambda name: str(bin_dir / name),
-    }
-    old = tmp_path / "old.json"
-    cli_mod.write_mcp_file(old, URL, canvas_secret=SECRET, **lookup)
-    servers = cli_mod.mcp_servers(URL, canvas_secret=SECRET, **lookup)
-    new = plan_launch(CLIS["claude"], EXE, servers, store.data_dir, False)
-    assert new.files["mcp.json"] == old.read_bytes()
 
 
 def test_an_ignored_choice_blocks_the_start_and_spawns_nothing(bmgr, made, bridge, store):

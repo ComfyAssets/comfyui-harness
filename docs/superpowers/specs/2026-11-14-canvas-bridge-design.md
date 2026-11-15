@@ -233,7 +233,7 @@ looks local, so it would prove nothing. The secret is the control.
 
 ### 6.3 Connecting it to the CLI
 
-`cli.write_mcp_file` gains the bridge entry beside `comfy-mcp`:
+`cli.mcp_servers` gives the bridge entry beside `comfy-mcp`:
 
 ```json
 "canvas": { "type": "http", "url": "<comfy_url>/harness/mcp",
@@ -243,8 +243,8 @@ looks local, so it would prove nothing. The secret is the control.
 It is written only when the bridge is enabled at session start. The file is
 already mode 600 in the data dir and rewritten per session. `comfy-mcp` being
 absent no longer means the file is removed: the file exists when either entry
-does, and `--mcp-config` is passed when the file exists. `write_mcp_file`
-reports which entries it wrote, and status keeps reporting `comfy-mcp` and
+does, and `--mcp-config` is passed when the file exists. `cli.mcp_servers`
+reports which entries apply, and status keeps reporting `comfy-mcp` and
 the bridge separately. `<comfy_url>` is the same loopback URL `comfy-mcp`
 gets.
 
