@@ -1,7 +1,10 @@
+import ast
 import hashlib
 import importlib.util
 import re
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 VENDOR = ROOT / "web/vendor/ghostty-web"
@@ -35,6 +38,38 @@ def test_root_module_declares_comfyui_contract():
     assert spec is not None
     assert 'WEB_DIRECTORY = "./web"' in src
     assert "NODE_CLASS_MAPPINGS" in src
+
+
+def _harness_imports(path: Path) -> tuple:
+    """Top-level modules, and sibling harness modules, that a harness file imports."""
+    outside: set = set()
+    siblings: set = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.Import):
+            outside.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            outside.add((node.module or "").split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            siblings.add(node.module.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            siblings.update(alias.name for alias in node.names)
+    return outside, siblings
+
+
+@pytest.mark.parametrize("name", ["mcp", "bridge"])
+def test_bridge_modules_never_reach_spawning_code(name):
+    # Directly or through another harness module: no subprocess, pty or session_host.
+    seen: set = set()
+    todo = [name]
+    while todo:
+        current = todo.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        assert current != "session_host", f"{name} reaches session_host"
+        outside, siblings = _harness_imports(ROOT / "harness" / f"{current}.py")
+        assert not outside & {"subprocess", "pty"}, f"{name} reaches spawning via {current}"
+        todo.extend(siblings)
 
 
 def test_harness_modules_use_no_absolute_harness_imports():

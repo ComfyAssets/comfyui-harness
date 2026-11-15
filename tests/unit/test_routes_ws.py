@@ -51,7 +51,9 @@ def made():
 @pytest.fixture(autouse=True)
 def sessions(deps, host, store, made, monkeypatch):
     monkeypatch.setattr(cli_mod, "find", fake_find)
-    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda path, url: False)
+    monkeypatch.setattr(
+        cli_mod, "write_mcp_file", lambda path, url, **kw: cli_mod.McpEntries(False, False)
+    )
 
     def factory():
         made.append(host)
@@ -351,11 +353,45 @@ async def test_size_limits_are_inclusive(client, deps, host):
     await ws.close()
 
 
-async def test_oversized_text_frame_closes_the_socket(client, deps):
+@pytest.fixture
+def parses(monkeypatch):
+    """Count the text frames the terminal parses as JSON."""
+    seen = []
+    real = terminal._parse
+
+    def counting(text):
+        seen.append(len(text))
+        return real(text)
+
+    monkeypatch.setattr(terminal, "_parse", counting)
+    return seen
+
+
+async def test_a_text_frame_over_4096_bytes_with_no_call_waiting_is_dropped_unparsed(
+    client, deps, host, parses
+):
     ws, _ = await paired_ws(client, deps)
-    await ws.send_str('{"type": "resize", "pad": "' + "x" * 4096 + '"}')
+    await start(ws)
+    parses.clear()
+    await ws.send_str('{"type": "resize", "cols": 9, "rows": 9, "pad": "' + "x" * 4096 + '"}')
+    await nothing_arrives(ws)
+    assert not ws.closed
+    assert parses == []
+    assert host.size == (80, 24)
+    await ws.close()
+
+
+async def test_a_text_frame_over_256_kib_closes_with_1009_even_with_no_call_waiting(
+    client, deps, parses
+):
+    from harness.bridge import MAX_REPLY
+
+    ws, _ = await paired_ws(client, deps)
+    parses.clear()
+    await ws.send_str('{"type": "resize", "pad": "' + "x" * MAX_REPLY + '"}')
     code, _ = await until_close(ws)
     assert code == 1009
+    assert parses == []
 
 
 async def test_text_frame_of_exactly_four_kib_is_accepted(client, deps):
@@ -868,3 +904,392 @@ async def test_install_cancels_the_ticker_on_server_shutdown(monkeypatch, tmp_pa
     server.app = web.Application()
     install(server)
     assert len(server.app.on_shutdown) == 1
+
+
+# --- canvas bridge frames on the socket -------------------------------------------------
+
+BRIDGE_TIMEOUT = 10.0
+
+
+@pytest.fixture
+def bridge(deps, host, store, made):
+    """A real Bridge wired to a session manager that holds it, as install() does."""
+    from harness.bridge import Bridge
+    from harness.routes import page_for_bridge
+
+    store.update(lambda state: replace(state, bridge_enabled=True))
+    made_bridge = Bridge(
+        store,
+        lambda: page_for_bridge(deps),
+        lambda: {},
+        timeout=BRIDGE_TIMEOUT,
+    )
+
+    def factory():
+        made.append(host)
+        return host
+
+    deps.sessions = SessionManager(
+        factory, store, CWD, lambda: "http://127.0.0.1:8188", bridge=made_bridge
+    )
+    deps.bridge = made_bridge
+    return made_bridge
+
+
+async def call_out(bridge, ws, name="get_selection"):
+    """Start a tool call; return it with the rid of the frame the page received."""
+    call = asyncio.ensure_future(bridge.call_tool(name, {}))
+    frame = await ws.receive_json(timeout=WAIT)
+    assert frame["type"] == "bridge" and frame["cmd"] == name
+    return call, frame["rid"]
+
+
+def reply_frame(rid, result=None):
+    return {"type": "bridge_reply", "rid": rid, "ok": True, "result": result or {"done": True}}
+
+
+def sized_reply(rid, size):
+    """A bridge_reply whose JSON text is exactly `size` bytes."""
+    head = '{"type": "bridge_reply", "rid": "' + rid + '", "ok": true, "result": {"pad": "'
+    tail = '"}}'
+    return head + "x" * (size - len(head) - len(tail)) + tail
+
+
+async def failed_unknown(call):
+    from harness.bridge import UNKNOWN
+    from harness.mcp import ToolError
+
+    with pytest.raises(ToolError) as caught:
+        await asyncio.wait_for(call, WAIT)
+    return caught.value.message == UNKNOWN
+
+
+async def test_a_bridge_reply_resolves_the_waiting_tool_call(client, deps, bridge):
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    call, rid = await call_out(bridge, ws)
+    await ws.send_json(reply_frame(rid, {"count": 3}))
+    assert await asyncio.wait_for(call, WAIT) == {"count": 3}
+    await ws.close()
+
+
+async def test_a_bridge_reply_of_200_kib_is_accepted(client, deps, bridge):
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    call, rid = await call_out(bridge, ws)
+    pad = "x" * (200 * 1024)
+    await ws.send_json(reply_frame(rid, {"pad": pad}))
+    assert await asyncio.wait_for(call, WAIT) == {"pad": pad}
+    assert not ws.closed
+    await ws.close()
+
+
+async def test_a_bridge_reply_of_exactly_256_kib_is_accepted(client, deps, bridge):
+    from harness.bridge import MAX_REPLY
+
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    call, rid = await call_out(bridge, ws)
+    text = sized_reply(rid, MAX_REPLY)
+    assert len(text.encode("utf-8")) == MAX_REPLY
+    await ws.send_str(text)
+    result = await asyncio.wait_for(call, WAIT)
+    assert len(result["pad"]) > 200 * 1024
+    await ws.close()
+
+
+async def test_a_bridge_reply_over_256_kib_closes_with_1009(client, deps, bridge):
+    from harness.bridge import MAX_REPLY
+
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    call, rid = await call_out(bridge, ws)
+    await ws.send_str(sized_reply(rid, MAX_REPLY + 1))
+    code, _ = await until_close(ws)
+    assert code == 1009
+    assert await failed_unknown(call)
+
+
+async def test_a_text_frame_over_256_kib_is_measured_in_utf8_bytes(client, deps, bridge):
+    from harness.bridge import MAX_REPLY
+
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    call, rid = await call_out(bridge, ws)
+    head = '{"type": "bridge_reply", "rid": "' + rid + '", "ok": true, "result": {"pad": "'
+    text = head + "é" * (MAX_REPLY // 2) + '"}}'
+    assert len(text) < MAX_REPLY < len(text.encode("utf-8"))
+    await ws.send_str(text)
+    code, _ = await until_close(ws)
+    assert code == 1009
+    assert await failed_unknown(call)
+
+
+async def test_any_other_text_frame_over_4096_bytes_closes_with_1009_while_a_call_waits(
+    client, deps, bridge
+):
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    call, _ = await call_out(bridge, ws)
+    await ws.send_str('{"type": "attach", "pad": "' + "x" * 4096 + '"}')
+    code, _ = await until_close(ws)
+    assert code == 1009
+    assert await failed_unknown(call)
+
+
+async def test_a_text_frame_over_4096_bytes_that_is_not_json_closes_with_1009_while_a_call_waits(
+    client, deps, bridge
+):
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    call, _ = await call_out(bridge, ws)
+    await ws.send_str("{" + "x" * 5000)
+    code, seen = await until_close(ws)
+    assert code == 1009
+    assert seen == []
+    assert await failed_unknown(call)
+
+
+async def test_a_bystanders_large_frame_is_dropped_unparsed(client, deps, bridge, parses):
+    holder, headers = await paired_ws(client, deps)
+    await start(holder)
+    bystander, _ = await connect(client, headers)
+    call, rid = await call_out(bridge, holder)
+    parses.clear()
+    await bystander.send_str(sized_reply(rid, 100 * 1024))
+    await nothing_arrives(bystander)
+    assert parses == []
+    assert not bystander.closed and not call.done()
+    await holder.send_json(reply_frame(rid))
+    assert await asyncio.wait_for(call, WAIT) == {"done": True}
+    await holder.close()
+    await bystander.close()
+
+
+async def test_a_late_large_reply_is_dropped_and_the_terminal_stays_open(
+    client, deps, bridge, parses
+):
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    call, rid = await call_out(bridge, ws)
+    await ws.send_json(reply_frame(rid))
+    await asyncio.wait_for(call, WAIT)
+    parses.clear()
+    await ws.send_str(sized_reply(rid, 100 * 1024))  # the same answer, arriving again late
+    await nothing_arrives(ws)
+    assert parses == []
+    assert not ws.closed
+    await ws.close()
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"type": "bridge_reply"},
+        {"type": "bridge_reply", "rid": 7, "ok": True, "result": {}},
+        {"type": "bridge_reply", "rid": None, "ok": True, "result": {}},
+        {"type": "bridge_reply", "rid": "not-waiting", "ok": True, "result": {}},
+        "RID_WITHOUT_OK",
+        "RID_WITH_A_LIST_RESULT",
+    ],
+)
+async def test_a_malformed_bridge_reply_is_dropped_without_an_error_frame(
+    client, deps, bridge, message
+):
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    call, rid = await call_out(bridge, ws)
+    if message == "RID_WITHOUT_OK":
+        message = {"type": "bridge_reply", "rid": rid}
+    elif message == "RID_WITH_A_LIST_RESULT":
+        message = {"type": "bridge_reply", "rid": rid, "ok": True, "result": [1]}
+    await ws.send_json(message)
+    await nothing_arrives(ws)
+    assert not ws.closed and not call.done()
+    await ws.send_json(reply_frame(rid))
+    assert await asyncio.wait_for(call, WAIT) == {"done": True}
+    await ws.close()
+
+
+async def test_bridge_replies_are_dropped_when_no_bridge_is_installed(client, deps):
+    ws, _ = await paired_ws(client, deps)
+    await ws.send_json({"type": "bridge_reply", "rid": "x", "ok": True, "result": {}})
+    await ws.send_str('{"type": "bridge_reply", "pad": "' + "x" * 5000 + '"}')
+    await nothing_arrives(ws)
+    assert not ws.closed
+    await ws.close()
+
+
+async def test_revoking_the_holder_fails_its_waiting_call_before_any_await(client, deps, bridge):
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    await pair(client, deps)  # another browser stays paired, so the session lives on
+    assert (await ws.receive_json(timeout=WAIT))["type"] == "paired"
+    call, rid = await call_out(bridge, ws)
+    future = bridge._waiting[rid][1]
+    deps.pairing.revoke(browser_id(deps))
+    assert future.done()  # no await since revoke(): failed synchronously with the mute
+    assert await failed_unknown(call)
+    code, _ = await until_close(ws)
+    assert code == 4401
+    assert deps.sessions.info() is not None
+
+
+async def test_disabling_the_terminal_fails_waiting_calls(client, deps, bridge, host, slow_kill):
+    ws, headers = await paired_ws(client, deps)
+    await start(ws)
+    call, rid = await call_out(bridge, ws)
+    future = bridge._waiting[rid][1]
+    disable = asyncio.ensure_future(
+        client.put("/harness/enabled", json={"enabled": False}, headers=headers)
+    )
+    await asyncio.wait_for(host.kill_started.wait(), WAIT)
+    assert future.done()
+    assert await failed_unknown(call)
+    assert (await disable).status == 204
+    code, _ = await until_close(ws)
+    assert code == 4409
+
+
+async def test_disable_drops_each_socket_before_the_session_stops(client, deps, bridge):
+    ws, headers = await paired_ws(client, deps)
+    await start(ws)
+    order = []
+    real_drop, real_stop = bridge.drop, deps.sessions.stop
+
+    def drop(sink):
+        order.append("drop")
+        real_drop(sink)
+
+    async def stop(reason):
+        order.append("stop")
+        await real_stop(reason)
+
+    bridge.drop = drop
+    deps.sessions.stop = stop
+    r = await client.put("/harness/enabled", json={"enabled": False}, headers=headers)
+    assert r.status == 204
+    assert order[:2] == ["drop", "stop"]
+    await until_close(ws)
+
+
+async def test_closing_the_socket_fails_its_waiting_call(client, deps, bridge):
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    call, _ = await call_out(bridge, ws)
+    await ws.close()
+    assert await failed_unknown(call)
+    assert deps.sessions.info() is not None
+
+
+async def test_a_reply_from_a_page_that_does_not_hold_the_session_is_ignored(client, deps, bridge):
+    holder, headers = await paired_ws(client, deps)
+    await start(holder)
+    bystander, _ = await connect(client, headers)
+    call, rid = await call_out(bridge, holder)
+    await bystander.send_json(reply_frame(rid, {"from": "bystander"}))
+    await nothing_arrives(bystander)
+    assert not call.done() and not bystander.closed
+    await holder.send_json(reply_frame(rid, {"from": "holder"}))
+    assert await asyncio.wait_for(call, WAIT) == {"from": "holder"}
+    await holder.close()
+    await bystander.close()
+
+
+async def test_with_another_browser_still_paired_the_next_page_gets_bridge_calls(
+    client, deps, bridge
+):
+    from harness.bridge import NO_PAGE
+    from harness.mcp import ToolError
+
+    first, _ = await paired_ws(client, deps)
+    await start(first)
+    second, _ = await paired_ws(client, deps)
+    assert (await first.receive_json(timeout=WAIT))["type"] == "paired"
+    call, _ = await call_out(bridge, first)
+    deps.pairing.revoke(browser_id(deps))
+    assert await failed_unknown(call)
+    await until_close(first)
+    with pytest.raises(ToolError) as caught:
+        await bridge.call_tool("get_selection", {})
+    assert caught.value.message == NO_PAGE
+    await second.send_json({"type": "attach", "cols": 80, "rows": 24})
+    await eventually(lambda: deps.sessions.sink is not None)
+    call, rid = await call_out(bridge, second)
+    await second.send_json(reply_frame(rid, {"page": 2}))
+    assert await asyncio.wait_for(call, WAIT) == {"page": 2}
+    await second.close()
+
+
+async def no_page(call):
+    from harness.bridge import NO_PAGE
+    from harness.mcp import ToolError
+
+    with pytest.raises(ToolError) as caught:
+        await call
+    return caught.value.message == NO_PAGE
+
+
+async def test_after_a_revoke_no_bridge_frame_goes_to_the_muted_holder(client, deps, bridge):
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    await pair(client, deps)  # another browser stays paired, so the session lives on
+    assert (await ws.receive_json(timeout=WAIT))["type"] == "paired"
+    deps.pairing.revoke(browser_id(deps))
+    # No await since the revoke: the spawned task that closes the socket has not run.
+    assert deps.sessions.sink is not None
+    assert await no_page(bridge.call_tool("get_selection", {}))
+    code, seen = await until_close(ws)
+    assert code == 4401
+    assert not any(m.get("type") == "bridge" for m in seen)
+
+
+async def test_a_holder_whose_pairing_expired_gets_no_bridge_frame(client, deps, bridge, clock):
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    clock.advance(COOKIE_IDLE + 1)
+    assert await no_page(bridge.call_tool("get_selection", {}))
+    code, seen = await until_close(ws)
+    assert code == 4401
+    assert not any(m.get("type") == "bridge" for m in seen)
+    assert deps.sessions.sink is None
+    assert deps.sessions.info() is not None
+
+
+async def test_a_holder_on_a_disabled_terminal_is_no_target_and_is_left_to_disable(
+    client, deps, bridge
+):
+    from harness.routes import page_for_bridge
+
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    holder = deps.sessions.sink
+    assert page_for_bridge(deps) is holder
+    deps.store.update(lambda state: replace(state, enabled=False))
+    assert page_for_bridge(deps) is None
+    assert not holder.closing and deps.sessions.sink is holder
+    await ws.close()
+
+
+async def test_a_closing_holder_gets_no_bridge_frame(client, deps, bridge):
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    holder = deps.sessions.sink
+    holder.close(1000, "bye")
+    assert await no_page(bridge.call_tool("get_selection", {}))
+    _, seen = await until_close(ws)
+    assert not any(m.get("type") == "bridge" for m in seen)
+
+
+async def test_bridge_frame_contents_are_never_logged(client, deps, bridge, caplog):
+    ws, _ = await paired_ws(client, deps)
+    await start(ws)
+    call, rid = await call_out(bridge, ws)
+    await ws.send_json(reply_frame(rid, {"words": "PAGE-CONTENT-MARKER"}))
+    await asyncio.wait_for(call, WAIT)
+    await ws.send_json({"type": "bridge_reply", "rid": "MALFORMED-MARKER"})
+    await nothing_arrives(ws)
+    await ws.close()
+    assert "PAGE-CONTENT-MARKER" not in caplog.text
+    assert "MALFORMED-MARKER" not in caplog.text
+    assert rid not in caplog.text

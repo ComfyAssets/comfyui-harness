@@ -49,8 +49,12 @@ class State:
     instance_id: str
     enabled: bool
     browsers: tuple[Browser, ...]
+    bridge_enabled: bool = False
+    bridge_edits: bool = True
+    bridge_runs: bool = False
 
 
+_BRIDGE_DEFAULTS = (("bridge_enabled", False), ("bridge_edits", True), ("bridge_runs", False))
 _BROWSER_STR_FIELDS = ("id", "token_sha256", "origin", "label")
 _BROWSER_NUM_FIELDS = ("created", "last_seen", "acknowledged")
 
@@ -91,11 +95,16 @@ def _parse_state(raw: Any) -> State:
     browsers = raw.get("browsers")
     if not isinstance(browsers, list):
         raise ValueError("browsers is not a list")
+    bridge = {name: raw.get(name, default) for name, default in _BRIDGE_DEFAULTS}
+    for name, value in bridge.items():
+        if not isinstance(value, bool):
+            raise ValueError(f"{name} is not a boolean")
     return State(
         schema=SCHEMA,
         instance_id=raw["instance_id"],
         enabled=raw["enabled"],
         browsers=tuple(_parse_browser(item) for item in browsers),
+        **bridge,
     )
 
 

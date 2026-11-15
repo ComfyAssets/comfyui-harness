@@ -181,6 +181,17 @@ test("a notice shows text and a button that runs its callback", () => {
   assert.equal(buttons(p.element).some((b) => b.textContent === "Revoke"), false, "notice clears after acting");
 });
 
+test("notify returns a clear that removes only that notice", () => {
+  const p = createPanel(fakeEnv());
+  const clearFirst = p.notify("first", { label: "Undo", onClick: () => {} });
+  clearFirst();
+  assert.equal(byText(p.element, "first"), undefined);
+  const clearOld = p.notify("old");
+  p.notify("new");
+  clearOld();
+  assert.ok(byText(p.element, "new"), "a later notice stays");
+});
+
 // Found in Chromium: a visibility transition keeps the panel hidden for the first
 // frame, so focus() on open fails and the first keys go elsewhere.
 test("opening shows the panel at once so focus can move into it; closing hides it after the slide", () => {

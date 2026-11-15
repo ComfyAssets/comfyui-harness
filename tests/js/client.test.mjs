@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  setBridge,
+  setBridgeEdits,
+  setBridgeRuns,
   getStatus, requestPairing, pollPairing, listBrowsers, revokeBrowser, setEnabled,
   HarnessError, errorFromResponse, openSocket,
 } from "../../web/client.js";
@@ -221,4 +224,22 @@ test("close() closes an open socket and later drops do not reconnect", () => {
   assert.equal(h.sock().closed, true);
   h.sock().drop(1000);
   assert.equal(h.live().length, 0);
+});
+
+test("the three client calls PUT the right path with {enabled}", async () => {
+  const calls = [];
+  const io = {
+    fetch: async (url, init) => {
+      calls.push([init.method, url, init.body]);
+      return { ok: true, status: 204, text: async () => "" };
+    },
+  };
+  await setBridge(io, true);
+  await setBridgeEdits(io, false);
+  await setBridgeRuns(io, true);
+  assert.deepEqual(calls, [
+    ["PUT", "/harness/bridge", JSON.stringify({ enabled: true })],
+    ["PUT", "/harness/bridge/edits", JSON.stringify({ enabled: false })],
+    ["PUT", "/harness/bridge/runs", JSON.stringify({ enabled: true })],
+  ]);
 });

@@ -203,8 +203,12 @@ the session's agent only if all of these hold:
 
 Anything else gets HTTP 403 with the existing refusal body, a new code
 `bridge_refused`, and no detail about which check failed. It is 403 and never
-401, so the CLI does not start an OAuth sign-in. Refusals are rate logged
-like the others, without header values.
+401, so the CLI does not start an OAuth sign-in. Each refusal is logged at
+INFO as `bridge_refused: <check>`, at most once per check a minute, naming the
+check that failed: `browser_header:Origin`, `browser_header:Cookie`,
+`browser_header:Sec-Fetch-Site`, `no_bearer`, `bad_bearer`,
+`secret_mismatch` or `no_bridge`. Header names only, never header values or
+the secret; the HTTP body still names no check.
 
 A caller that passes is the session's agent, and from there every answer is a
 proper MCP answer. `initialize`, `ping` and `tools/list` always work. A
@@ -214,8 +218,11 @@ off, so the agent can tell the author instead of seeing a broken connection.
 
 The secret is 32 random bytes, hex. It is made when a session starts **and
 the bridge is enabled at that moment**, and kept only in memory and in that
-session's `mcp.json`. It is cleared when the session ends **and when the
-bridge is switched off**. So a secret from an old session opens nothing, and
+session's `mcp.json`. The in-memory secret is cleared when the session ends
+**and when the bridge is switched off**. The copy in the session's
+`mcp.json` stays there until the next session start rewrites the file, but
+it opens nothing: only the in-memory secret is compared. So a secret from an
+old session opens nothing, and
 switching the bridge off and on again does not bring an old session's bridge
 back: the session has to be started again under the new consent. The agent
 can read its own secret; that is accepted, since access is not enforced
@@ -268,11 +275,20 @@ synchronously on revoke and disable.
 - When no page holds the session (the page was closed and the session is
   detached), tools fail with "No ComfyUI page is attached to this session.
   Open ComfyUI and the terminal, then try again."
-- Reply size limit 256 KiB. Today `harness/terminal.py` closes the socket on
-  any text frame over 4096 bytes (`MAX_TEXT_FRAME`). The limit becomes per
-  message type: 256 KiB for `bridge_reply`, unchanged for everything else,
-  decided before the frame is parsed as JSON by more than its type. The
-  terminal spec's WebSocket message table gains `bridge` and `bridge_reply`.
+- Reply size limit 256 KiB. Every text frame but a `bridge_reply` stays
+  limited to 4096 bytes (`MAX_TEXT_FRAME`). A text frame over 256 KiB closes
+  the socket with 1009, unparsed. A text frame over 4096 bytes is parsed only
+  while the bridge has a call waiting on that socket; otherwise it is dropped
+  unparsed and the socket stays open, so a paired bystander cannot force
+  large parses and a reply that arrives after its call timed out does not end
+  the terminal. A parsed frame over 4096 bytes that is not JSON, or whose type
+  is not `bridge_reply`, closes the socket with 1009. The terminal spec's
+  WebSocket message table gains `bridge` and `bridge_reply`.
+- A bridge frame goes only to a holder that may still use the socket: one
+  that is muted (revoked or disabled, before its socket closes), closing, or
+  whose browser no longer passes the socket's own admission check (revoked
+  or expired pairing) counts as no page attached, and an unpaired holder is
+  shut the usual way. The check and the send happen with no await between.
 - Page replies are untrusted input: parsed, checked against the expected
   shape for the command, and passed on as data.
 
@@ -288,7 +304,7 @@ Read (each returns `fingerprint` and the workflow's name):
 | `get_outline` | `max_chars` (default 20000, max 60000) | The outline (below), `node_count`, `detail` (`full`, `no_values`, `no_titles`, `groups_only`) |
 | `get_nodes` | `ids` (1 to 50) | Ids that do not exist are listed under `missing` and the rest are still returned. For each node: type, title, mode, position, size, every widget with its current value (and for a combo, up to 50 of its options plus the total count), every input with its type and what it is linked from, every output with its type and what it is linked to |
 | `get_selection` | none | The same detail for the nodes the author has selected (first 50), plus the count |
-| `get_errors` | none | Nodes with validation errors and why, the last execution error (node, type, message, the traceback's last 20 lines), node types on the canvas that are not installed |
+| `get_errors` | none | Nodes with validation errors and why, the last execution error (node, type, message, the traceback's last 20 lines), `prompt`: the last error ComfyUI gave for a prompt as a whole rather than for a node (`{type, message}`, for example a workflow with no output node; `null` when there is none), node types on the canvas that are not installed |
 | `get_outputs` | `ids` (optional) | For each node that has shown output since the page loaded: the files, as absolute paths on the ComfyUI machine, so the agent can open an image with its own file tool. The server turns the page's `{filename, subfolder, type}` into a path under ComfyUI's output, temp or input directory and drops any entry that does not resolve inside one of them |
 | `get_node_types` | `types` (1 to 20) **or** `search` (text, returns up to 30 names with their category) | For each type: inputs (name, type, required, default, options summary), outputs (name, type). From the node types registered in the page, so frontend-only nodes are included |
 
@@ -327,10 +343,20 @@ and `summary` (one line, shown to the author). Ops:
 `node`, `from`, `to` and `near` take an id as printed by the read tools, or a
 `ref` from an earlier `add_node` in the same batch.
 
-Result: `applied` (true or false), the new `fingerprint`, `ids` (ref to new
-node id), and for every `set_widget` the value the widget holds after the
-write. If it differs from what was asked, that op is listed under
-`changed_by_node` so the agent knows the write did not stick as sent.
+Result of an edit that applied: `applied: true`, the new `fingerprint`,
+`ids` (ref to new node id), and for every `set_widget` the value the widget
+holds after the write (`widgets`). If it differs from what was asked, that op
+is listed under `changed_by_node` so the agent knows the write did not stick
+as sent. An edit that did not apply is never a result with `applied: false`:
+it is a tool error (`isError: true`) whose message names the op and the
+reason, and says when the canvas may be partly changed (6.6 step 4).
+
+Results over the reply limit: an `edit` or `run` has already acted when its
+result is built, so its result is trimmed, never replaced by an error. An
+edit's result drops `widgets` first, then `changed_by_node` as well, with a
+`note` saying to read the nodes; a run's result drops the refused prompt's
+node errors, with a `note` pointing to `get_errors`. Read tools that are over
+the limit fail with "too much to send at once" and change nothing.
 
 Run:
 
@@ -351,7 +377,10 @@ it is ready to test instead of running it yourself.
   can see when the run is done and then look at the result.
 - The panel's notice line says "Claude queued a run" with a **Cancel**
   button that removes that prompt from the queue, or interrupts it if it has
-  started.
+  started. The notice goes once the run is over: it is re-checked like the
+  Undo notice, and "idle" counts as over once the run was seen queued or
+  running, or from the first timed check on. Cancel on a finished run does
+  nothing and says nothing.
 - A run cannot be undone: it uses the GPU and writes output files. That is
   why it has its own tool, its own switch and its own notice.
 
@@ -371,16 +400,22 @@ All in the page, in `web/bridge.js`:
    on either side, or any member of a comma-joined list). The first failure
    refuses the whole batch and names the op by its position, with what would
    be valid (for example the widget names the node has, or the slot types).
-3. **Apply inside one change group.** Call the active workflow's change
-   tracker `beforeChange()`, apply every op in order, call `afterChange()`.
+3. **Apply inside one change group.** If the author is in the middle of a
+   change (the tracker's nesting depth is not zero), refuse with "busy".
+   Otherwise first record any author change not yet recorded (the tracker's
+   `captureCanvasState()`), so it stays its own undo step. Then call the
+   active workflow's change tracker `beforeChange()`, apply every op in order, call `afterChange()`.
    That is one undo state for the whole batch. Verified in frontend 1.59.1:
    `beforeChange` increments a counter and `afterChange` records one state
    when it returns to zero.
 4. **If an op throws while applying,** finish the change group and put the
-   canvas back as it was, then report `applied: false` with the op and the
+   canvas back as it was, then fail the tool call with the op and the
    error. Putting it back must never undo a step of the author's: the page
    undoes once only if this batch recorded a new undo state (a batch that
-   threw before changing anything records none). If it cannot tell, it
+   threw before changing anything records none). "Recorded" is decided by
+   comparing the newest undo entry before and after, not the history's
+   length, which stops growing at 50. Undo is asynchronous and reloads the
+   graph, so the page waits for it and finds nodes again by id. If it cannot tell, it
    restores the graph from a copy taken before step 3 instead.
 5. **Tell the author.** The panel's existing notice line shows the agent's
    `summary` and the counts ("Claude: add 4x upscaler after the final image.
@@ -432,8 +467,11 @@ agent reads again.
 | `harness/session.py` | Makes and clears the secret with the session; exposes the attached sink |
 | `harness/cli.py` | Writes the `canvas` entry (6.3) |
 | `harness/store.py` | `bridge_enabled` (default false), `bridge_edits` (default true) and `bridge_runs` (default false) in `state.json` |
-| `web/bridge.js` | Pure functions over an injected graph and app: outline, node detail, fingerprint, validation, apply, placement. No import of ComfyUI's `app` |
-| `web/harness.js` | Routes bridge frames to `web/bridge.js` with the real `app`; shows the notice |
+| `web/bridge.js` | Answers each command through an injected host; the notice with Undo or Cancel; result shaping and trimming. No import of ComfyUI's `app` |
+| `web/bridge-read.js` | Pure: outline, node detail, fingerprint, group membership, node type lookup |
+| `web/bridge-edit.js` | Pure: validation, apply as one undo step, placement, rollback |
+| `web/harness.js` | `createComfyHost`, the one adapter over ComfyUI's `app`, its change tracker and internal stores; routes bridge frames to `web/bridge.js`; shows the notice |
+| `web/dialogs.js` | The consent dialog (section 9) |
 | `web/settings.js` | The bridge rows (section 9) |
 
 `harness/bridge.py` and `harness/mcp.py` must not import `session_host`,
@@ -447,6 +485,8 @@ agent reads again.
 | Bridge or terminal switched off while the session runs | `tools/call` returns `isError` saying the owner turned it off. Switching the bridge off also clears the secret, so the next request is refused with 403 |
 | No page attached | "No ComfyUI page is attached to this session…" |
 | Page takes longer than 20 s, or the socket closes mid-call | "The page did not answer. The outcome is unknown: read the canvas again before doing anything else." |
+| A call still queued behind another when the bridge is switched off | The owner turned it off (nothing reached the page) |
+| A call still queued behind another when the session ends or restarts | "The session ended before this call was sent." |
 | Another page takes over the session mid-call | Same as a closed socket; the next call goes to the new page |
 | The browser holding the session is revoked mid-call | Waiting calls fail at once (synchronously with the mute). If it was the last paired browser the session stops, as today. If another browser is still paired the session lives on, as today, and tools answer "No ComfyUI page is attached" until a paired page takes the session over |
 | Terminal disabled mid-call | Waiting calls fail at once (synchronously with the mute); the session stops, as today |
@@ -472,7 +512,8 @@ agent reads again.
   It takes effect for sessions started afterwards (the CLI reads its MCP
   config at start); the settings row says so, and offers "Start again", which
   is the existing stop followed by start-and-continue, so the conversation is
-  kept. Turning it off takes effect at once and clears the session's secret.
+  kept. Turning it off takes effect at once and clears the session's secret;
+  calls in flight fail.
 - **Allow edits** (server state, `bridge_edits`, default on). Changed only
   by a paired browser, next to the bridge switch. When off, the server
   refuses `edit` before anything reaches the page, and reads still work.
@@ -488,14 +529,21 @@ agent reads again.
   tool's description that the agent follows; code cannot prove what was said
   in the conversation, and the row says so. An owner who wants a hard stop
   keeps the switch off, or sets their own Claude Code permissions to ask
-  before `run`.
+  before `run`. The row says: "Asking first is an instruction to the agent,
+  not a check. Keep this off for a hard stop."
+- Turning Allow edits or Allow runs off refuses the next call; it does not
+  stop a call already sent to the page. Turning the bridge off fails calls
+  in flight.
 - All three switches are consent **for the server**, given by its owner, not per
   browser. With two paired browsers, either can hold the session and its
   bridge, exactly as either can hold the terminal today. Like every switch
   in this project they do not restrain the agent itself, which runs as the
   owner's account and can edit the state file; the settings rows say so.
-- Status gains `bridge_enabled`, `bridge_edits`, `bridge_runs` and `bridge_available` (false with a reason
-  when ComfyUI serves TLS itself or the platform is unsupported).
+- Status, for a paired browser only, gains `bridge_enabled`, `bridge_edits`,
+  `bridge_runs`, `bridge_available` and `bridge_reason`. The reason is `""`
+  when available, `"tls"` when ComfyUI serves TLS itself, `"not_loopback"`
+  when ComfyUI listens on a LAN address or host name (the bridge entry is
+  only written for a loopback URL, 6.3), and `"unsupported"` off Linux.
 
 The agent's own permission prompts are untouched: no CLI flag is added, and
 the first use of each `canvas` tool is asked for or allowed by the owner's own
@@ -584,7 +632,86 @@ Claude Code settings.
 - How `terminal.py` and `bridge.py` share the waiting-reply table without
   breaking the rule that mutes happen before any `await`.
 
-## 13. Decisions
+## 13. Changes after the frontend spike
+
+Task 1 of the plan checked every call above in frontend 1.59.1
+(`docs/superpowers/plans/2026-11-14-canvas-bridge-frontend-notes.md`).
+Nothing the design needs is missing. These details changed; the author
+approved continuing with them.
+
+- `run` queues through the same call as the Run button. That call does not
+  return the prompt id, so the page captures the id and queue number from
+  ComfyUI's API layer for that one call.
+- Cancel is one call that removes a queued prompt or stops a running one.
+- Applying an edit: refuse while the author is mid-change; record any
+  unrecorded author change first; detect a recorded undo step by the newest
+  entry, not the count; wait for undo and look nodes up again (6.6).
+- The notice's Undo works only while the agent's step is still the newest
+  undo entry, nothing has been redone, and the same workflow tab is active.
+- Putting the canvas back from the copy loads it the way the tracker's own
+  undo does, so the undo history afterwards is as it was before the batch.
+  A batch rolled back by undo is dropped from the redo queue, so Ctrl+Y
+  cannot re-apply a failed edit.
+- `run` is refused while a subgraph is open, with the message "Close the
+  subgraph to run the whole workflow, or press Run yourself." The reason: the
+  fingerprint covers only the graph on screen, while a run queues the whole
+  workflow, so inside a subgraph the agent has not read what would run. It
+  costs the author one click (close the subgraph, or press Run).
+- `run` reports the agent's own prompt even when the author presses Run at
+  the same moment (both pass through ComfyUI's one queueing loop).
+- An `edit` or `run` result over the reply limit is cut down instead of
+  becoming `too_large`, because it has already acted: an edit drops
+  `widgets`, then `changed_by_node` too; a run drops the refused prompt's
+  node errors; each with a note (6.5).
+- A failed `edit` is a tool error naming the op, not a result with
+  `applied: false` (6.5, 6.6).
+- `get_errors` also returns `prompt`, ComfyUI's last error for a prompt as a
+  whole (6.5).
+- The Undo notice is re-checked on the tracker's `graphChanged` event, on
+  every bridge command and once a second while it is shown.
+- The page runs bridge commands one at a time, so a command never starts
+  while an earlier edit's rollback is still awaiting undo or restore (the
+  server stops waiting on a timeout and sends the next call).
+- The graph shown is the canvas's graph (root, or the opened subgraph).
+  Node ids are strings. A workflow's stable identity for the fingerprint is
+  its tab's instance id, which unsaved workflows also have.
+- Errors and outputs are kept per workflow tab. `get_errors` and
+  `get_outputs` describe the tab on screen, since the page loaded.
+- The last execution error carries the whole prompt and workflow; the page
+  passes on only the fields in 6.5, never that object.
+- Combo widgets accept any value, so the page's validation is the only
+  check that a combo value is one of its options.
+- Run state, errors, outputs and node definitions are partly reachable only
+  through the frontend's internal stores. That works on the pinned 1.59.1
+  and may move on an upgrade. Every such use stays in one adapter in
+  `web/harness.js`, and the real-ComfyUI test catches a move.
+- The real-ComfyUI tests must load only the branch's copy of the node; the
+  test copy is linked as `comfyui-harness-under-test` and only that name is
+  whitelisted.
+
+Found when the tests first ran in a real ComfyUI (Task 13), and fixed:
+
+- ComfyUI's Settings dialog sets `pointer-events: none` on the page body,
+  marks every other body child `aria-hidden` and closes on a press outside
+  itself, so the consent dialog opened from Settings could not be clicked.
+  The pairing and consent dialogs now take the pointer, unhide themselves on
+  open and keep `pointerdown` and `focusin` from reaching the page.
+- A node's `boundingRect` is filled when the canvas draws: all zeros for a
+  node just added, the old place for one just moved. Placement and group
+  membership use the node's `pos` and `size`. A `move_node` on a node added
+  earlier in the same batch keeps its place.
+- When a failed batch's own undo rejects and the page restores its copy, the
+  batch's recorded step (equal to the copy) is dropped too, so the author's
+  next Ctrl+Z is not an empty step.
+- Verified in the real page: one Ctrl+Z removes a whole batch; a `Note` can
+  be added and its text set; widget writes go through `widget.setValue`;
+  `node.pos` assignment sticks; an author change fires `graphChanged`, on
+  which (and on the 1 s timer) the Undo notice is re-checked and goes; rollback by undo and by restore with a full
+  50-entry history and inside an open subgraph (a subgraph can be built
+  without models); a tiny CPU run returns a prompt id and `get_outputs` then
+  gives a file that exists.
+
+## 14. Decisions
 
 | Decision | By |
 |---|---|

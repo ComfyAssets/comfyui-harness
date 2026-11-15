@@ -13,6 +13,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Optional
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ FORBIDDEN = (
 )
 
 MCP_SERVER = "comfy-mcp"
+CANVAS_SERVER = "canvas"
 HARNESS_ENV_PREFIX = "COMFYUI_HARNESS_"
 LOCALE_KEYS = ("LC_ALL", "LC_CTYPE", "LANG")
 FALLBACK_LOCALE = "C.UTF-8"
@@ -147,6 +149,43 @@ def _write_private_atomically(target: Path, data: bytes) -> None:
         raise
 
 
+@dataclass(frozen=True)
+class McpEntries:
+    """Which servers the per-session MCP file holds."""
+
+    comfy: bool
+    canvas: bool
+
+    @property
+    def any(self) -> bool:
+        return self.comfy or self.canvas
+
+
+def is_loopback_http(url: str) -> bool:
+    """Plain http to a loopback host only: the bearer token must never leave the machine."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return False
+    if parts.scheme != "http" or not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _canvas_entry(url: str, secret: str) -> dict:
+    return {
+        "type": "http",
+        "url": url.rstrip("/") + "/harness/mcp",
+        "headers": {"Authorization": "Bearer " + secret},
+    }
+
+
 def write_mcp_file(
     mcp_path: Path,
     url: str,
@@ -154,23 +193,29 @@ def write_mcp_file(
     python: Optional[str] = None,
     path: Optional[str] = None,
     home: Optional[Path] = None,
-) -> bool:
+    canvas_secret: Optional[str] = None,
+) -> McpEntries:
     if python is None:
         python = sys.executable
+    servers: dict[str, dict] = {}
     server = find_mcp_server(python, path, home)
-    if server is None:
+    if server is not None:
+        env = {"COMFYUI_URL": url}
+        comfy = _comfy_bin(which, python)
+        if comfy is not None:
+            env["COMFY_BIN"] = comfy
+        servers[MCP_SERVER] = {"command": str(server), "env": env}
+    if canvas_secret is not None and is_loopback_http(url):
+        servers[CANVAS_SERVER] = _canvas_entry(url, canvas_secret)
+    entries = McpEntries(comfy=MCP_SERVER in servers, canvas=CANVAS_SERVER in servers)
+    if not entries.any:
         try:
             os.unlink(mcp_path)
         except FileNotFoundError:
             pass
-        return False
-    env = {"COMFYUI_URL": url}
-    comfy = _comfy_bin(which, python)
-    if comfy is not None:
-        env["COMFY_BIN"] = comfy
-    config = {"mcpServers": {MCP_SERVER: {"command": str(server), "env": env}}}
-    _write_private_atomically(mcp_path, json.dumps(config, indent=2).encode())
-    return True
+        return entries
+    _write_private_atomically(mcp_path, json.dumps({"mcpServers": servers}, indent=2).encode())
+    return entries
 
 
 def build_argv(cli: Cli, exe: Path, mcp_path: Optional[Path], resume: bool) -> list[str]:

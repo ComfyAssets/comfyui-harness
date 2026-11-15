@@ -1,4 +1,5 @@
-// Shared helpers for the browser specs: the fake CLI's log, pairing, screen text.
+// Shared helpers for the browser specs: the fake CLI's log, pairing, screen text,
+// and the canvas bridge's MCP endpoint as the session's agent calls it.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -103,6 +104,14 @@ export async function resetServer(baseURL, dataDir) {
   const browsers = await (await fetch(`${origin}/harness/pair/browsers`, {
     headers: { Cookie: cookie, "Sec-Fetch-Site": "same-origin" },
   })).json();
+  // The bridge switches go back to their defaults before the browsers do.
+  for (const [path, enabled] of [["/bridge", false], ["/bridge/edits", true], ["/bridge/runs", false]]) {
+    const response = await fetch(`${origin}/harness${path}`, {
+      method: "PUT", headers: { Cookie: cookie, Origin: origin, "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    if (response.status !== 204) throw new Error(`reset: ${path} answered ${response.status}`);
+  }
   const ordered = [...browsers.filter((b) => !b.current), ...browsers.filter((b) => b.current)];
   for (const browser of ordered) {
     const response = await fetch(`${origin}/harness/pair/browsers/${browser.id}`, {
@@ -110,4 +119,62 @@ export async function resetServer(baseURL, dataDir) {
     });
     if (response.status !== 204) throw new Error(`reset: revoke answered ${response.status}`);
   }
+}
+
+// The session's mcp.json, or null when the session wrote none.
+export function mcpConfig(dataDir) {
+  const path = join(dataDir, "mcp.json");
+  return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : null;
+}
+
+// The canvas entry of the session's mcp.json, called from this Node process the
+// way the agent does: no Origin, no Cookie, no Sec-Fetch-Site. `initialize` runs
+// once, before the first call. call() resolves { isError, text, result } with
+// `result` the parsed JSON of a successful tool call; raw() resolves
+// { status, body } and lets a test add or override headers.
+export function mcp(dataDir) {
+  const entry = mcpConfig(dataDir)?.mcpServers?.canvas;
+  if (!entry) throw new Error("mcp: the session's mcp.json has no canvas entry");
+  let nextId = 1;
+  let initialized = null;
+
+  async function raw(body, headers = {}) {
+    const response = await fetch(entry.url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json", ...entry.headers, ...headers },
+      body: JSON.stringify(body),
+    });
+    const text = await response.text();
+    let parsed;
+    try {
+      parsed = text ? JSON.parse(text) : null;
+    } catch {
+      parsed = text;
+    }
+    return { status: response.status, body: parsed };
+  }
+
+  async function rpc(method, params) {
+    const reply = await raw({ jsonrpc: "2.0", id: nextId++, method, params });
+    if (reply.status !== 200 || reply.body?.error) {
+      throw new Error(`mcp: ${method} answered ${reply.status} ${JSON.stringify(reply.body)}`);
+    }
+    return reply.body.result;
+  }
+
+  function initialize() {
+    initialized ??= rpc("initialize", {
+      protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "browser-test", version: "0" },
+    });
+    return initialized;
+  }
+
+  async function call(tool, args = {}) {
+    await initialize();
+    const result = await rpc("tools/call", { name: tool, arguments: args });
+    const text = result.content?.[0]?.text ?? "";
+    return { isError: result.isError === true, text, result: result.isError ? null : JSON.parse(text) };
+  }
+
+  return { call, raw };
 }

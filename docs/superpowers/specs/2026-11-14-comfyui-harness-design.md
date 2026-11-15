@@ -48,9 +48,14 @@ Goals:
 - Nothing runs until the owner opts in. Access is enforced against browsers
   and network callers. It is not enforced against the agent (section 4).
 
-Non-goals: the canvas bridge; an agent loop of our own or API keys; container
-isolation of the CLI; a general shell; more than one session; shared servers;
-mobile browsers.
+Non-goals: an agent loop of our own or API keys; container isolation of the
+CLI; a general shell; more than one session; shared servers; mobile browsers.
+
+The canvas bridge (the agent reading and editing the workflow open in the
+page) was a non-goal of the first release. It is now built, opt-in and off by
+default, and specified in `2026-11-14-canvas-bridge-design.md`; where the two
+documents disagree about the bridge, that one wins. This document gains its
+routes, frames and modules below.
 
 Anti-goals:
 
@@ -202,13 +207,17 @@ GET, `Sec-Fetch-Site: same-origin`. Everything else is **unpaired**.
 
 | Route | Method | Unpaired | Paired | Body in, body out |
 |---|---|---|---|---|
-| `/harness/status` | GET | yes | yes | out: `{supported, paired, enabled}`; paired callers also get `{cli_found, mcp_found, session, origin}` (origin: the address this browser paired from) |
+| `/harness/status` | GET | yes | yes | out: `{supported, paired, enabled}`; paired callers also get `{cli_found, mcp_found, session, origin}` (origin: the address this browser paired from) and the bridge fields `{bridge_enabled, bridge_edits, bridge_runs, bridge_available, bridge_reason, bridge_live}` (bridge spec 9) |
 | `/harness/pair/request` | POST | yes | yes | out: `{code, poll_secret, expires_in, command, docker_command}` |
 | `/harness/pair/poll` | POST | yes | yes | header `X-Harness-Poll`; out: `{state: waiting, rejected, expired, paired}` |
 | `/harness/pair/browsers` | GET | no | yes | out: list of `{id, label, origin, created, last_seen, current}` |
 | `/harness/pair/browsers/{id}` | DELETE | no | yes | 204 |
 | `/harness/enabled` | PUT | no | yes | in: `{enabled}`; 204 |
 | `/harness/terminal/ws` | GET upgrade | no | yes | needs enabled |
+| `/harness/bridge` | PUT | no | yes | in: `{enabled}`; 204. Off clears the session's bridge secret at once |
+| `/harness/bridge/edits` | PUT | no | yes | in: `{enabled}`; 204 |
+| `/harness/bridge/runs` | PUT | no | yes | in: `{enabled}`; 204 |
+| `/harness/mcp` | POST | no | no | The canvas bridge's MCP endpoint. Only the session's agent: `Authorization: Bearer <session secret>` and no `Origin`, `Cookie` or `Sec-Fetch-Site`; anything else is 403 `bridge_refused`. `GET` and `DELETE` are 405 (bridge spec 6.1, 6.2) |
 
 ComfyUI mirrors every route under `/api` **(source)**; both prefixes are
 tested. ComfyUI's own middleware answers some cross-site requests with a bare
@@ -228,6 +237,7 @@ Refusals are `{ "error": { "code", "message" } }`:
 | `spawn_failed` | 500 | WebSocket start | the reason |
 | `unsafe_permissions` | 500 | status, any route | which path, and the fix |
 | `bad_state` | 500 | status, any route | "state file unreadable; see README" |
+| `bridge_refused` | 403 | `/harness/mcp` | nothing: no page calls it; the body never says which check failed |
 
 ## 8. Files
 
@@ -241,7 +251,7 @@ does not create it, so the package creates it at import, mode 700.
 | `key` | The machine key. |
 | `state.json` | See below. Read once at start; memory is authoritative after that, and each change is written atomically (temp file, fsync, rename). |
 | `pair` | Written by `pair.py`. |
-| `mcp.json` | The per-session MCP file handed to the CLI. |
+| `mcp.json` | The per-session MCP file handed to the CLI: the `comfy-mcp` entry, and the `canvas` entry with the session's bridge secret when the bridge was on at session start. Mode 600. |
 | `session.pid` | The running agent's process-group id, for cleanup after a crash. |
 
 ```json
@@ -249,6 +259,9 @@ does not create it, so the package creates it at import, mode 700.
   "schema": 1,
   "instance_id": "9f3a61c2",
   "enabled": true,
+  "bridge_enabled": false,
+  "bridge_edits": true,
+  "bridge_runs": false,
   "browsers": [
     { "id": "…", "token_sha256": "…", "origin": "https://comfy.example",
       "label": "Chrome on Linux", "created": 0, "last_seen": 0,
@@ -320,6 +333,9 @@ Category "Harness".
 | Opacity | slider, 20 to 100% | 90% | ComfyUI settings |
 | Font size | number | 14 | ComfyUI settings |
 | Terminal enabled | switch | off | server |
+| Canvas bridge (with its consent dialog and "Start again") | switch | off | server |
+| Allow edits | switch | on | server |
+| Allow runs | switch | off | server |
 | Paired browsers | list with revoke | none | server |
 | CLI and `comfy-mcp` found | read-only | n/a | server |
 
@@ -356,10 +372,15 @@ ComfyUI 0.45.0 or later, Linux.
 | `session_host.py` | The PTY. | **yes** |
 | `session.py` | One session, attach rules, limits. | no |
 | `routes.py` | aiohttp routes and the WebSocket. | no |
+| `terminal.py` | The terminal WebSocket, socket registry, revoke and disable handling; carries bridge frames. | no |
+| `mcp.py` | The canvas bridge's MCP protocol layer: JSON-RPC parsing, schema checks, results. No aiohttp, no state. | no |
+| `bridge.py` | The canvas bridge: tool table, session secret, one call at a time, waiting replies, output paths. | no |
 
 Plus `pair.py` at the package root. `store`, `pairing` and `guard` import
 nothing from the other modules, so the bridge package can reuse them.
-`session_host.py` is the only module that imports `subprocess` or `pty`.
+`session_host.py` is the only module that imports `subprocess` or `pty`;
+`mcp.py` and `bridge.py` import neither, directly or through another module,
+and a test asserts it.
 
 ### The CLI
 
@@ -446,6 +467,15 @@ Binary frames are terminal bytes. Text frames are JSON. Heartbeat every 25 s.
 | server to page, first | `{type:"hello", boot, session: null \| {cli, started}}` |
 | page to server | `{type:"attach", cols, rows}`, `{type:"start", cli, cols, rows, resume}`, `{type:"resize", cols, rows}`, `{type:"stop"}` |
 | server to page | `{type:"started"}`, `{type:"exit", code}`, `{type:"detached", reason}`, `{type:"error", code, message}` |
+| server to page, canvas bridge | `{type:"bridge", rid, cmd, args}`: one MCP tool call, sent only to the socket holding the session |
+| page to server, canvas bridge | `{type:"bridge_reply", rid, ok: true, result}` or `{type:"bridge_reply", rid, ok: false, error: {code, message}}`; accepted only on the socket the request went to, for a waiting `rid`, once |
+
+Text frames are limited per message type: 256 KiB for `bridge_reply`, 4096
+bytes for every other type. A frame over 256 KiB closes the socket with 1009,
+unparsed. A frame over 4096 bytes is parsed only while the canvas bridge has a
+call waiting on that socket; otherwise it is dropped unparsed and the socket
+stays open. A parsed frame over 4096 bytes that is not a `bridge_reply`
+closes the socket with 1009.
 
 `detached.reason` is one of `taken_over`, `revoked`, `disabled`, `idle`,
 `limit`, `stop` (the page asked to end the session). `boot` changes on every server start; a page that sees a new value
@@ -466,11 +496,14 @@ terminal content are never logged. Display codes may be.
 
 | File | Job |
 |---|---|
-| `harness.js` | Registers the extension and settings. |
+| `harness.js` | Registers the extension and settings. Holds `createComfyHost`, the only adapter over the frontend's objects and internal stores for the bridge. |
 | `keys.js` | Pure functions: key matching, capture, focus rules. |
 | `panel.js` | The drop-down and its states. |
 | `client.js` | Status, pairing and switch calls; the WebSocket. |
-| `dialogs.js` | Pairing popup with disclosure. |
+| `dialogs.js` | Pairing popup with disclosure; the canvas bridge consent dialog. Both open above ComfyUI's own Settings dialog. |
+| `bridge.js` | Canvas bridge commands: answers `bridge` frames from the live canvas through an injected host; the notice with Undo or Cancel. |
+| `bridge-read.js` | Pure: the outline, node detail, fingerprint, group membership, node type lookup. |
+| `bridge-edit.js` | Pure: validates and applies an `edit` batch as one undo step; placement; rollback. |
 | `style.js` | ComfyUI colour tokens and button styles shared by the popup, panel and settings rows. |
 | `settings.js` | Setting rows. |
 | `vendor/ghostty-web/ghostty-web.mjs` | Vendored ghostty-web 0.4.0. |
@@ -495,8 +528,14 @@ Test-first throughout.
   poll secret, invalid HMAC.
 - **Exposure**, against a real ComfyUI: fetch `key`, `state.json`, `pair` and
   `mcp.json` through `/userdata` and expect refusal; pair, then assert no
-  cookie or poll secret appears in `/internal/logs`. Run once more with
-  `--enable-cors-header` and once with `--enable-agent`.
+  cookie or poll secret appears in `/internal/logs`. With a session running
+  (fake CLI) and the bridge on: `/harness/mcp` and `/api/harness/mcp` refuse a
+  cookie, an `Origin`, `Sec-Fetch-Site`, no secret, a wrong secret, an older
+  session's secret and the bridge switched off; `mcp.json` is not served by
+  `/userdata` or `/view`, and the secret is not in the logs. Run once more
+  with `--enable-cors-header` and once with `--enable-agent`. The test copy
+  of the node is linked as `comfyui-harness-under-test` so an installed
+  `comfyui-harness` is not loaded beside it.
 - **PTY** (Linux): output, resize reaching the child, Ctrl+C, resume after
   stop, group kill of a child that ignores SIGTERM, cleanup after the server
   is ended with SIGTERM and SIGKILL, a 1 MB paste.

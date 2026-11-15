@@ -1,5 +1,6 @@
 // Smoke run in a real ComfyUI (frontend 1.59.1) with the fake CLI; see
 // tools/testing/comfyui.config.mjs. The real claude is never on the lookup path.
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect } from "../browser/playwright.mjs";
 import { cliLog, dialogOf, pairThroughPopup, panelOf } from "../browser/helpers.mjs";
@@ -25,6 +26,23 @@ async function focusCanvas(page) {
 }
 
 const bottomPanel = (page) => page.locator("#bottom-panel");
+// The scratch link's folder name (comfyui.config.mjs); the author's own ComfyUI
+// also has a custom_nodes/comfyui-harness that must not load here.
+const UNDER_TEST = process.env.HARNESS_NODE_NAME;
+
+test("the page loads this checkout's harness and no other copy", async ({ page, request }) => {
+  expect(UNDER_TEST).toBe("comfyui-harness-under-test");
+  const loaded = [];
+  page.on("request", (r) => loaded.push(new URL(r.url()).pathname));
+  await loadComfy(page);
+  const served = await request.get(`/extensions/${UNDER_TEST}/harness.js`);
+  expect(served.status()).toBe(200);
+  expect(await served.text()).toBe(readFileSync(join(process.env.HARNESS_TEST_REPO, "web/harness.js"), "utf8"));
+  expect(loaded).toContain(`/extensions/${UNDER_TEST}/harness.js`);
+  expect(loaded.filter((path) => path.startsWith("/extensions/comfyui-harness/"))).toEqual([]);
+  const other = await request.get("/extensions/comfyui-harness/harness.js");
+  expect(other.status()).toBe(404);
+});
 
 test("the harness runs in a real ComfyUI with the fake CLI", async ({ page }) => {
   const mark = log.mark();

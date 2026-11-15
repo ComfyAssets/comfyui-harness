@@ -1,7 +1,7 @@
 // Smoke run against a real ComfyUI (make comfyui-test). Not in CI.
 //
 // Starts a second, throwaway ComfyUI on 127.0.0.1:8774 from COMFYUI_DIR
-// (default ~/comfy/ComfyUI) with every custom node disabled except this one,
+// (default ~/comfy/ComfyUI) with every custom node disabled except this one (as comfyui-harness-under-test),
 // linked in from a scratch directory that also holds its user, temp, input and
 // output directories. A fake `claude` is first on its PATH, so the real CLI is
 // never started.
@@ -15,6 +15,9 @@ import { fileURLToPath } from "node:url";
 const repo = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const comfy = process.env.COMFYUI_DIR ?? join(homedir(), "comfy/ComfyUI");
 const port = 8774;
+// Not "comfyui-harness": the author's ComfyUI has its own custom_nodes/comfyui-harness
+// (the main checkout), and a whitelist of that name would load it as well.
+const NODE_NAME = "comfyui-harness-under-test";
 const quote = (text) => `'${text.replaceAll("'", "'\\''")}'`;
 
 function makeScratch() {
@@ -22,7 +25,7 @@ function makeScratch() {
   for (const dir of ["nodes", "user/default", "temp", "input", "output", "bin"]) {
     mkdirSync(join(scratch, dir), { recursive: true });
   }
-  symlinkSync(repo, join(scratch, "nodes/comfyui-harness"));
+  symlinkSync(repo, join(scratch, "nodes", NODE_NAME));
   writeFileSync(join(scratch, "extra.yaml"), `harness_check:\n  base_path: ${scratch}\n  custom_nodes: nodes\n`);
   // Skip the first-run template browser so the canvas takes the first key.
   writeFileSync(join(scratch, "user/default/comfy.settings.json"), JSON.stringify({ "Comfy.TutorialCompleted": true }));
@@ -52,11 +55,12 @@ if (!process.env.HARNESS_COMFY_SCRATCH) {
 const scratch = process.env.HARNESS_COMFY_SCRATCH;
 process.env.HARNESS_TEST_REPO = repo;
 process.env.HARNESS_COMFY_PORT = String(port);
+process.env.HARNESS_NODE_NAME = NODE_NAME;
 process.env.FAKE_CLI_LOG = join(scratch, "fake_cli.log");
 
 const args = [
   "main.py", "--listen", "127.0.0.1", "--port", String(port), "--cpu",
-  "--disable-all-custom-nodes", "--whitelist-custom-nodes", "comfyui-harness",
+  "--disable-all-custom-nodes", "--whitelist-custom-nodes", NODE_NAME,
   "--extra-model-paths-config", join(scratch, "extra.yaml"),
   "--user-directory", join(scratch, "user"), "--temp-directory", join(scratch, "temp"),
   "--input-directory", join(scratch, "input"), "--output-directory", join(scratch, "output"),

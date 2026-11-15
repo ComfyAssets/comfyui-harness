@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DISCLOSURE, createPairingDialog } from "../../web/dialogs.js";
+import { BRIDGE_DISCLOSURE, DISCLOSURE, createBridgeDialog, createPairingDialog } from "../../web/dialogs.js";
 import { HarnessError } from "../../web/client.js";
 
 class El {
@@ -20,6 +20,7 @@ class El {
   set textContent(v) { this._text = String(v); this.children = []; }
   get textContent() { return this._text + this.children.map((c) => c.textContent).join(""); }
   setAttribute(k, v) { this.attributes[k] = String(v); }
+  removeAttribute(k) { delete this.attributes[k]; }
   appendChild(c) { c.parent = this; this.children.push(c); return c; }
   append(...cs) { for (const c of cs) this.appendChild(c); }
   replaceChildren(...cs) { this.children = []; this._text = ""; this.append(...cs); }
@@ -364,3 +365,115 @@ test("request a new code is the primary action", async () => {
   await s.poll();
   assert.match(s.byText("Request a new code", "BUTTON").style.background, /^var\(--primary-background, /);
 });
+
+const BRIDGE_STATEMENTS = [
+  "The agent in the terminal can read the workflow open in this page: every node, every setting and every prompt text in it.",
+  "It can change that workflow. Each change is one undo step.",
+  "It can learn the file paths of your outputs and open those images.",
+  "Text inside a workflow (notes, titles, prompts) is read by the agent and can steer it.",
+];
+
+test("bridge disclosure strings are verbatim", () => {
+  assert.deepEqual([...BRIDGE_DISCLOSURE], BRIDGE_STATEMENTS);
+});
+
+test("the bridge dialog lists the statements, starts hidden and has Cancel and Turn on", () => {
+  const dialog = createBridgeDialog({ document: fakeDocument, onAccept: () => {} });
+  const root = dialog.element;
+  assert.equal(root.style.display, "none");
+  assert.equal(root.find((e) => e.tagName === "LI").length, 4);
+  assert.deepEqual(root.find((e) => e.tagName === "LI").map((e) => e.textContent), BRIDGE_STATEMENTS);
+  const labels = root.find((e) => e.tagName === "BUTTON").map((e) => e.textContent);
+  assert.deepEqual(labels, ["×", "Cancel", "Turn on"]);
+  for (const b of root.find((e) => e.tagName === "BUTTON")) assert.ok(b.style.background, b.textContent);
+  dialog.open();
+  assert.equal(root.style.display, "flex");
+  dialog.close();
+  assert.equal(root.style.display, "none");
+});
+
+test("Turn on accepts and closes; Cancel and × only close", () => {
+  let accepted = 0;
+  const dialog = createBridgeDialog({ document: fakeDocument, onAccept: () => accepted++ });
+  const button = (text) => dialog.element.find((e) => e.tagName === "BUTTON" && e.textContent === text)[0];
+  for (const text of ["Cancel", "×"]) {
+    dialog.open();
+    button(text).dispatch("click");
+    assert.equal(dialog.element.style.display, "none");
+  }
+  assert.equal(accepted, 0);
+  dialog.open();
+  button("Turn on").dispatch("click");
+  assert.equal(accepted, 1);
+  assert.equal(dialog.element.style.display, "none");
+});
+
+function focusDocument() {
+  const doc = {
+    activeElement: null,
+    createElement: (t) => { const e = fakeDocument.createElement(t); e.focus = () => { doc.activeElement = e; }; return e; },
+  };
+  return doc;
+}
+
+test("Escape closes the bridge dialog like Cancel and does not propagate", () => {
+  let accepted = 0;
+  const dialog = createBridgeDialog({ document: fakeDocument, onAccept: () => accepted++ });
+  dialog.open();
+  let stopped = false;
+  dialog.element.dispatch("keydown", { key: "Escape", stopPropagation: () => { stopped = true; } });
+  assert.equal(dialog.element.style.display, "none");
+  assert.equal(accepted, 0);
+  assert.equal(stopped, true);
+});
+
+test("other keys in the bridge dialog do not close it", () => {
+  const dialog = createBridgeDialog({ document: fakeDocument });
+  dialog.open();
+  dialog.element.dispatch("keydown", { key: "a" });
+  assert.equal(dialog.element.style.display, "flex");
+});
+
+test("the bridge dialog takes focus on open and gives it back on close", () => {
+  const doc = focusDocument();
+  const before = doc.createElement("button");
+  before.focus();
+  const dialog = createBridgeDialog({ document: doc });
+  dialog.open();
+  const turnOn = dialog.element.find((e) => e.tagName === "BUTTON" && e.textContent === "Turn on")[0];
+  assert.equal(doc.activeElement, turnOn);
+  dialog.close();
+  assert.equal(doc.activeElement, before);
+});
+
+// ComfyUI's own modal dialogs (Settings) set pointer-events: none on <body>,
+// mark every other child of <body> aria-hidden, and close on a pointerdown or
+// focus outside themselves. A dialog opened from Settings must still work.
+const BOTH_DIALOGS = [
+  ["pairing", () => setup().dialog],
+  ["bridge", () => createBridgeDialog({ document: fakeDocument })],
+];
+
+for (const [name, make] of BOTH_DIALOGS) {
+  test(`the ${name} dialog takes the pointer even when the page's modal turns it off on <body>`, () => {
+    const dialog = make();
+    assert.equal(dialog.element.style.pointerEvents, "auto");
+  });
+
+  test(`the ${name} dialog drops an aria-hidden set by the page's modal when it opens`, () => {
+    const dialog = make();
+    dialog.element.setAttribute("aria-hidden", "true");
+    dialog.open();
+    assert.equal(dialog.element.attributes["aria-hidden"], undefined);
+  });
+
+  test(`a press or focus in the ${name} dialog does not reach the page's modal as an outside click`, () => {
+    const dialog = make();
+    dialog.open();
+    for (const type of ["pointerdown", "focusin"]) {
+      let stopped = false;
+      dialog.element.dispatch(type, { stopPropagation: () => { stopped = true; } });
+      assert.equal(stopped, true, type);
+    }
+  });
+}

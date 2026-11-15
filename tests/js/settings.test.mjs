@@ -210,3 +210,145 @@ test("found and not found lines carry a mark so they read at a glance", () => {
   assert.ok(el.find((e) => e.textContent === "✓")[0]);
   assert.ok(el.find((e) => e.textContent === "✗")[0]);
 });
+
+const BRIDGE = { ...PAIRED, bridge_enabled: false, bridge_edits: true, bridge_runs: false, bridge_available: true, bridge_reason: "", bridge_live: false, session: null };
+const render = (status, extra = {}) => {
+  const io = extra.io ?? fakeIo();
+  const el = renderServerRows({ document: fakeDocument(), io, status, browsers: [], onPair: () => {}, ...extra });
+  return { el, io };
+};
+const switchFor = (el, name) => {
+  const label = el.find((e) => e.tagName === "LABEL" && e.textContent === name)[0];
+  return label.find((e) => e.tagName === "INPUT")[0];
+};
+const bridgeDialogEl = (el) => el.find((e) => e.attributes.role === "dialog")[0];
+// A stand-in opener: records each request and lets the test accept it.
+const opener = () => {
+  const o = { opened: 0, accept: null };
+  o.openBridgeDialog = (accept) => { o.opened++; o.accept = accept; };
+  return o;
+};
+const flip = (box, on) => { box.checked = on; box.dispatch("change"); };
+
+test("the Canvas rows show a heading, three switches and the honesty line", () => {
+  const { el } = render(BRIDGE);
+  assert.ok(byText(el, "Canvas", "H4"));
+  assert.equal(switchFor(el, "Canvas bridge").checked, false);
+  assert.equal(switchFor(el, "Allow edits").checked, true);
+  assert.equal(switchFor(el, "Allow runs").checked, false);
+  assert.ok(byText(el, "When off, the agent can read the canvas but not change it."));
+  assert.ok(byText(el, "Lets the agent press Run when you ask it to. A run uses your GPU and writes output files, and cannot be undone. Asking first is an instruction to the agent, not a check. Keep this off for a hard stop."));
+  assert.ok(byText(el, "These are settings the harness honours. They do not restrain the agent itself, which runs as your account."));
+});
+
+test("the rows create no dialog element", () => {
+  const { el } = render(BRIDGE, { openBridgeDialog: () => {} });
+  assert.equal(bridgeDialogEl(el), undefined);
+});
+
+test("turning the bridge on calls the opener and nothing else until it accepts", async () => {
+  let refreshed = 0;
+  const o = opener();
+  const { el, io } = render(BRIDGE, { onChange: () => refreshed++, openBridgeDialog: o.openBridgeDialog });
+  const box = switchFor(el, "Canvas bridge");
+  flip(box, true);
+  await flush();
+  assert.equal(o.opened, 1);
+  assert.equal(box.checked, false);
+  assert.deepEqual(io.calls, []);
+  o.accept();
+  await flush();
+  assert.deepEqual(io.calls.map((c) => [c.method, c.url, c.body]), [["PUT", "/harness/bridge", JSON.stringify({ enabled: true })]]);
+  assert.equal(refreshed, 1);
+});
+
+test("never accepting leaves the switch off and makes no request", async () => {
+  const o = opener();
+  const { el, io } = render(BRIDGE, { openBridgeDialog: o.openBridgeDialog });
+  const box = switchFor(el, "Canvas bridge");
+  flip(box, true);
+  await flush();
+  assert.equal(box.checked, false);
+  assert.deepEqual(io.calls, []);
+});
+
+test("turning the bridge off calls the server at once", async () => {
+  let refreshed = 0;
+  const { el, io } = render({ ...BRIDGE, bridge_enabled: true }, { onChange: () => refreshed++ });
+  flip(switchFor(el, "Canvas bridge"), false);
+  await flush();
+  assert.deepEqual(io.calls.map((c) => [c.method, c.url, c.body]), [["PUT", "/harness/bridge", JSON.stringify({ enabled: false })]]);
+  assert.equal(refreshed, 1);
+});
+
+test("edits and runs switches call their routes and then ask for a refresh", async () => {
+  let refreshed = 0;
+  const { el, io } = render(BRIDGE, { onChange: () => refreshed++ });
+  flip(switchFor(el, "Allow edits"), false);
+  await flush();
+  flip(switchFor(el, "Allow runs"), true);
+  await flush();
+  assert.deepEqual(io.calls.map((c) => [c.method, c.url, c.body]), [
+    ["PUT", "/harness/bridge/edits", JSON.stringify({ enabled: false })],
+    ["PUT", "/harness/bridge/runs", JSON.stringify({ enabled: true })],
+  ]);
+  assert.equal(refreshed, 2);
+});
+
+test("the restart line shows only when the bridge is on and the running session lacks it", () => {
+  const running = { cli: "claude", started: 1 };
+  const line = "Takes effect when the session starts again.";
+  const cases = [
+    [{ bridge_enabled: true, session: running, bridge_live: false }, true],
+    [{ bridge_enabled: true, session: running, bridge_live: true }, false],
+    [{ bridge_enabled: true, session: null, bridge_live: false }, false],
+    [{ bridge_enabled: false, session: running, bridge_live: false }, false],
+  ];
+  for (const [patch, shown] of cases) {
+    const { el } = render({ ...BRIDGE, ...patch });
+    assert.equal(Boolean(byText(el, line)), shown, JSON.stringify(patch));
+    assert.equal(Boolean(byText(el, "Start again", "BUTTON")), shown, JSON.stringify(patch));
+  }
+});
+
+test("Start again calls the restart handler and then asks for a refresh", async () => {
+  const seen = [];
+  let refreshed = 0;
+  const { el } = render(
+    { ...BRIDGE, bridge_enabled: true, session: { cli: "claude", started: 1 } },
+    { onRestart: async () => seen.push("restart"), onChange: () => refreshed++ },
+  );
+  byText(el, "Start again", "BUTTON").click();
+  await flush();
+  assert.deepEqual(seen, ["restart"]);
+  assert.equal(refreshed, 1);
+});
+
+test("an unavailable bridge shows the reason and no switches", () => {
+  const texts = {
+    tls: "The canvas bridge is not available when ComfyUI serves HTTPS itself.",
+    unsupported: "Not supported on this platform",
+    not_loopback: "The canvas bridge needs ComfyUI to listen on this machine's own address (127.0.0.1 or all interfaces).",
+  };
+  for (const [reason, text] of Object.entries(texts)) {
+    const { el } = render({ ...BRIDGE, bridge_available: false, bridge_reason: reason });
+    assert.ok(byText(el, text), reason);
+    assert.equal(el.find((e) => e.tagName === "LABEL" && e.textContent === "Canvas bridge").length, 0);
+    assert.equal(el.find((e) => e.tagName === "LABEL" && e.textContent === "Allow edits").length, 0);
+  }
+});
+
+test("the Canvas rows are absent for an unpaired browser", () => {
+  const { el } = render({ supported: true, paired: false, enabled: true });
+  assert.equal(byText(el, "Canvas", "H4"), undefined);
+});
+
+test("every button in the Canvas rows is styled", () => {
+  const { el } = render({ ...BRIDGE, bridge_enabled: true, session: { cli: "claude", started: 1 } });
+  const all = buttons(el).filter((b) => b.textContent !== "Revoke");
+  assert.ok(all.length >= 1);
+  for (const b of all) {
+    assert.equal(b.attributes.type, "button", b.textContent);
+    assert.ok(b.style.background, b.textContent);
+  }
+});

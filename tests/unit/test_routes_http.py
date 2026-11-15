@@ -1,7 +1,12 @@
+import asyncio
+import json
 import logging
+from dataclasses import replace
 
 import pytest
+from aiohttp import web
 
+from harness.mcp import MAX_BODY
 from harness.pairing import COOKIE_IDLE
 from harness.routes import Deps
 from harness.store import Store, StoreError
@@ -32,6 +37,12 @@ async def test_status_for_paired_caller_adds_cli_and_session(client, deps):
         "mcp_found": False,
         "session": None,
         "origin": ORIGIN,
+        "bridge_enabled": False,
+        "bridge_edits": True,
+        "bridge_runs": False,
+        "bridge_available": False,
+        "bridge_reason": "unsupported",  # no Bridge was built for these deps
+        "bridge_live": False,
     }
 
 
@@ -359,6 +370,8 @@ def fake_folder_paths(monkeypatch, path):
     module = types.ModuleType("folder_paths")
     module.get_system_user_directory = lambda name: str(path)  # type: ignore[attr-defined]
     module.base_path = str(path.parent)  # type: ignore[attr-defined]
+    for kind in ("output", "temp", "input"):
+        setattr(module, f"get_{kind}_directory", lambda kind=kind: str(path.parent / kind))
     monkeypatch.setitem(sys.modules, "folder_paths", module)
 
 
@@ -401,3 +414,469 @@ async def test_install_keeps_a_store_error_for_the_routes(monkeypatch, tmp_path)
     deps = install(FakePromptServer())
     assert deps.store is None and deps.pairing is None
     assert deps.store_error is not None
+    assert deps.bridge is None
+
+
+# ---------------------------------------------------------------------------
+# The canvas bridge: POST /mcp, the switches, status (canvas bridge spec 6.1, 6.2, 9)
+
+MCP = "/harness/mcp"
+INITIALIZE = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+TOOLS_CALL = {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "tools/call",
+    "params": {"name": "get_selection", "arguments": {}},
+}
+SWITCHES = {
+    "/bridge": "bridge_enabled",
+    "/bridge/edits": "bridge_edits",
+    "/bridge/runs": "bridge_runs",
+}
+
+
+class PageSink:
+    """The page holding the session: records bridge frames and answers them."""
+
+    def __init__(self):
+        self.frames = []
+        self.bridge = None
+
+    def send_json(self, message):
+        self.frames.append(message)
+        reply = {"type": "bridge_reply", "rid": message["rid"], "ok": True, "result": {"n": 0}}
+        asyncio.get_running_loop().call_soon(self.bridge.reply, self, reply)
+
+    def send_bytes(self, data):  # pragma: no cover - the bridge sends JSON only
+        raise AssertionError("unused")
+
+    def buffered(self):  # pragma: no cover - unused
+        return 0
+
+
+def bearer(secret):
+    return {"Authorization": "Bearer " + secret}
+
+
+async def assert_bridge_refused(r):
+    assert r.status == 403
+    assert await r.json() == {"error": {"code": "bridge_refused", "message": ""}}
+
+
+@pytest.fixture
+def page():
+    return PageSink()
+
+
+@pytest.fixture
+def bridge(deps, page):
+    from harness.bridge import Bridge
+
+    deps.store.update(lambda s: replace(s, enabled=True, bridge_enabled=True))
+    made = Bridge(deps.store, lambda: page, lambda: {}, timeout=2.0)
+    page.bridge = made
+    deps.bridge = made
+    return made
+
+
+@pytest.fixture
+def running_session(bridge):
+    """The secret of a session that runs with the bridge on."""
+    return bridge.open_session()
+
+
+@pytest.mark.parametrize("prefix", PREFIXES)
+async def test_mcp_initialize_works_with_the_session_secret(client, running_session, prefix):
+    r = await client.post(f"{prefix}/mcp", json=INITIALIZE, headers=bearer(running_session))
+    assert r.status == 200
+    body = await r.json()
+    assert body["id"] == 1
+    assert body["result"]["serverInfo"]["name"] == "canvas"
+
+
+async def test_mcp_tools_call_reaches_the_page_and_returns_its_result(
+    client, running_session, page
+):
+    r = await client.post(MCP, json=TOOLS_CALL, headers=bearer(running_session))
+    assert r.status == 200
+    result = (await r.json())["result"]
+    assert result["isError"] is False
+    assert json.loads(result["content"][0]["text"]) == {"n": 0}
+    assert [f["cmd"] for f in page.frames] == ["get_selection"]
+
+
+async def test_mcp_notification_is_202_with_an_empty_body(client, running_session):
+    note = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+    r = await client.post(MCP, json=note, headers=bearer(running_session))
+    assert r.status == 202
+    assert await r.read() == b""
+
+
+async def test_mcp_refuses_with_403_when_no_bridge_exists(client):
+    await assert_bridge_refused(await client.post(MCP, json=INITIALIZE, headers=bearer("ab" * 32)))
+
+
+async def test_mcp_refuses_with_403_when_no_session_runs(client, bridge):
+    await assert_bridge_refused(await client.post(MCP, json=INITIALIZE, headers=bearer("ab" * 32)))
+    await assert_bridge_refused(await client.post(MCP, json=INITIALIZE))
+
+
+async def test_mcp_refuses_an_old_sessions_secret(client, bridge, page):
+    old = bridge.open_session()
+    bridge.close_session()
+    new = bridge.open_session()
+    for message in (INITIALIZE, TOOLS_CALL):
+        await assert_bridge_refused(await client.post(MCP, json=message, headers=bearer(old)))
+    assert page.frames == []
+    assert (await client.post(MCP, json=INITIALIZE, headers=bearer(new))).status == 200
+
+
+async def test_mcp_refuses_a_paired_browser(client, deps, running_session, page):
+    headers, _ = await pair(client, deps)
+    r = await client.post(MCP, json=TOOLS_CALL, headers={**headers, **bearer(running_session)})
+    await assert_bridge_refused(r)
+    origin_only = {"Origin": ORIGIN, **bearer(running_session)}
+    await assert_bridge_refused(await client.post(MCP, json=TOOLS_CALL, headers=origin_only))
+    assert page.frames == []
+
+
+async def test_a_secret_from_a_session_that_restarts_mid_body_never_reaches_the_page(
+    client, bridge, page
+):
+    """The secret is checked after the body is read, and the session is bound there."""
+    old = bridge.open_session()
+    raw = json.dumps(TOOLS_CALL).encode()
+    gate = asyncio.Event()
+
+    async def slow_body():
+        yield raw[:10]
+        await gate.wait()
+        yield raw[10:]
+
+    sent = asyncio.create_task(client.post(MCP, data=slow_body(), headers=bearer(old)))
+    await asyncio.sleep(0.1)  # the server has the headers and is reading the body
+    bridge.close_session()
+    bridge.open_session()
+    gate.set()
+    await assert_bridge_refused(await sent)
+    assert page.frames == []
+
+
+@pytest.mark.parametrize("prefix", PREFIXES)
+@pytest.mark.parametrize("method", ["GET", "DELETE"])
+async def test_mcp_get_and_delete_are_405(client, prefix, method):
+    r = await client.request(method, f"{prefix}/mcp")
+    assert r.status == 405
+    assert r.headers["Allow"] == "POST"
+
+
+async def test_mcp_body_over_one_mebibyte_is_413(client, running_session, page):
+    r = await client.post(MCP, data=b" " * (MAX_BODY + 1), headers=bearer(running_session))
+    assert r.status == 413
+    assert page.frames == []
+
+
+async def test_mcp_body_of_exactly_one_mebibyte_is_read(client, running_session):
+    raw = json.dumps(INITIALIZE).encode()
+    raw += b" " * (MAX_BODY - len(raw))
+    r = await client.post(MCP, data=raw, headers=bearer(running_session))
+    assert r.status == 200
+
+
+async def test_mcp_never_reads_the_whole_body_at_once(client, running_session, monkeypatch):
+    async def unbounded(self):
+        raise AssertionError("request.read() has no bound")
+
+    monkeypatch.setattr(web.BaseRequest, "read", unbounded)
+    r = await client.post(MCP, json=INITIALIZE, headers=bearer(running_session))
+    assert r.status == 200
+
+
+async def test_mcp_without_the_secret_refuses_a_large_body_with_403(client, bridge):
+    r = await client.post(MCP, data=b" " * (MAX_BODY + 1), headers=bearer("ab" * 32))
+    await assert_bridge_refused(r)
+
+
+@pytest.mark.parametrize("switch", ["bridge_enabled", "enabled"])
+async def test_tools_call_with_the_bridge_switched_off_is_a_tool_error_not_a_403(
+    client, deps, running_session, page, switch
+):
+    from harness.bridge import OFF
+
+    deps.store.update(lambda s: replace(s, **{switch: False}))
+    r = await client.post(MCP, json=TOOLS_CALL, headers=bearer(running_session))
+    assert r.status == 200
+    result = (await r.json())["result"]
+    assert result["isError"] is True
+    assert result["content"][0]["text"] == OFF
+    assert page.frames == []
+    ping = {"jsonrpc": "2.0", "id": 3, "method": "ping"}
+    assert (await client.post(MCP, json=ping, headers=bearer(running_session))).status == 200
+
+
+async def test_turning_the_bridge_off_clears_the_secret_and_the_next_request_is_403(
+    client, deps, running_session, bridge, monkeypatch
+):
+    headers, _ = await pair(client, deps)
+    calls = []
+    real = bridge.switched_off
+
+    def watched():
+        calls.append(deps.store.state.bridge_enabled)  # the store already says off
+        real()
+
+    monkeypatch.setattr(bridge, "switched_off", watched)
+    r = await client.put("/harness/bridge", json={"enabled": False}, headers=headers)
+    assert r.status == 204
+    assert calls == [False]
+    assert not bridge.secret_matches(running_session)
+    again = await client.post(MCP, json=INITIALIZE, headers=bearer(running_session))
+    await assert_bridge_refused(again)
+    # Turning it on again does not bring the old session's bridge back.
+    r = await client.put("/harness/bridge", json={"enabled": True}, headers=headers)
+    assert r.status == 204
+    assert calls == [False]
+    again = await client.post(MCP, json=INITIALIZE, headers=bearer(running_session))
+    await assert_bridge_refused(again)
+
+
+async def test_turning_the_bridge_off_clears_the_secret_even_if_the_write_fails(
+    client, deps, running_session, bridge, monkeypatch
+):
+    headers, _ = await pair(client, deps)
+
+    def fail(change):
+        raise StoreError("unsafe_permissions", deps.store.data_dir, "mode is wrong")
+
+    monkeypatch.setattr(deps.store, "update", fail)
+    r = await client.put("/harness/bridge", json={"enabled": False}, headers=headers)
+    assert r.status == 500
+    assert not bridge.secret_matches(running_session)
+
+
+async def test_turning_the_bridge_off_without_a_bridge_still_saves(client, deps):
+    headers, _ = await pair(client, deps)
+    deps.store.update(lambda s: replace(s, bridge_enabled=True))
+    r = await client.put("/harness/bridge", json={"enabled": False}, headers=headers)
+    assert r.status == 204
+    assert deps.store.state.bridge_enabled is False
+
+
+@pytest.mark.parametrize("prefix", PREFIXES)
+@pytest.mark.parametrize("path", list(SWITCHES))
+async def test_the_three_switch_routes_need_a_paired_browser(client, deps, prefix, path):
+    def switches():
+        return [getattr(deps.store.state, f) for f in SWITCHES.values()]
+
+    before = switches()
+    r = await client.put(prefix + path, json={"enabled": True}, headers={"Origin": ORIGIN})
+    assert r.status == 401
+    assert (await r.json())["error"]["code"] == "not_paired"
+    headers, _ = await pair(client, deps)
+    foreign = {**headers, "Origin": "https://evil.example"}
+    r = await client.put(prefix + path, json={"enabled": True}, headers=foreign)
+    assert r.status == 403
+    assert switches() == before
+
+
+@pytest.mark.parametrize("path,field", list(SWITCHES.items()))
+async def test_the_three_switch_routes_change_state(client, deps, path, field):
+    headers, _ = await pair(client, deps)
+    others = [f for f in SWITCHES.values() if f != field]
+    for value in (True, False, True):
+        before = {f: getattr(deps.store.state, f) for f in others}
+        r = await client.put("/harness" + path, json={"enabled": value}, headers=headers)
+        assert r.status == 204
+        assert getattr(deps.store.state, field) is value
+        assert {f: getattr(deps.store.state, f) for f in others} == before
+
+
+async def test_edits_and_runs_never_change_the_bridge_switch(client, deps, running_session, bridge):
+    headers, _ = await pair(client, deps)
+    for path in ("/bridge/edits", "/bridge/runs"):
+        for value in (False, True):
+            r = await client.put("/harness" + path, json={"enabled": value}, headers=headers)
+            assert r.status == 204
+            assert deps.store.state.bridge_enabled is True
+    assert bridge.secret_matches(running_session)
+
+
+@pytest.mark.parametrize("path", list(SWITCHES))
+async def test_the_switch_routes_reject_bad_bodies(client, deps, path):
+    headers, _ = await pair(client, deps)
+    r = await client.put("/harness" + path, data=b'{"enabled": 1}', headers=headers)
+    assert r.status == 400
+    assert (await r.json())["error"]["code"] == "bad_request"
+
+
+async def test_status_reports_the_bridge_only_to_a_paired_browser(client, deps, bridge):
+    body = await (await client.get("/harness/status")).json()
+    assert not any(key.startswith("bridge") for key in body)
+    headers, _ = await pair(client, deps)
+    body = await (await client.get("/harness/status", headers=same_origin(headers))).json()
+    assert body["bridge_enabled"] is True
+    assert body["bridge_edits"] is True
+    assert body["bridge_runs"] is False
+    assert body["bridge_available"] is True
+    assert body["bridge_reason"] == ""
+    assert body["bridge_live"] is False
+
+
+async def test_status_reports_whether_the_running_session_has_a_bridge_secret(client, deps, bridge):
+    headers, _ = await pair(client, deps)
+    bridge.open_session()
+    body = await (await client.get("/harness/status", headers=same_origin(headers))).json()
+    assert body["bridge_live"] is True
+    bridge.close_session()
+    body = await (await client.get("/harness/status", headers=same_origin(headers))).json()
+    assert body["bridge_live"] is False
+
+
+@pytest.mark.parametrize(
+    "url,supported,reason",
+    [
+        ("https://127.0.0.1:8188", True, "tls"),
+        ("http://192.168.1.5:8188", True, "not_loopback"),
+        ("http://comfy.lan:8188", True, "not_loopback"),
+        ("http://[::1", True, "not_loopback"),
+        ("http://[::1]:8188", True, ""),
+        ("http://localhost:8188", True, ""),
+        ("http://127.0.0.1:8188", False, "unsupported"),
+        ("https://127.0.0.1:8188", False, "unsupported"),
+    ],
+)
+async def test_status_says_why_the_bridge_is_unavailable(
+    client, deps, bridge, url, supported, reason
+):
+    headers, _ = await pair(client, deps)
+    deps.comfy_url = lambda: url
+    deps.supported = supported
+    body = await (await client.get("/harness/status", headers=same_origin(headers))).json()
+    assert body["bridge_reason"] == reason
+    assert body["bridge_available"] is (reason == "")
+
+
+async def test_status_says_tls_when_comfyui_serves_tls_itself(client, deps, bridge):
+    headers, _ = await pair(client, deps)
+    deps.comfy_url = lambda: "https://127.0.0.1:9443"
+    body = await (await client.get("/harness/status", headers=same_origin(headers))).json()
+    assert body["bridge_available"] is False
+    assert body["bridge_reason"] == "tls"
+
+
+async def test_the_mcp_route_is_also_reachable_under_a_second_prefix(aiohttp_client, deps, bridge):
+    from harness.routes import setup
+
+    secret = bridge.open_session()
+    app = web.Application()
+    routes = web.RouteTableDef()
+    setup(routes, deps, "/api/harness")
+    app.add_routes(routes)
+    client = await aiohttp_client(app)
+    r = await client.post("/api/harness/mcp", json=INITIALIZE, headers=bearer(secret))
+    assert r.status == 200
+
+
+async def test_an_unexpected_error_logs_only_its_type(
+    client, running_session, monkeypatch, harness_logs
+):
+    from harness import routes
+
+    async def broken(raw, tools, call):
+        raise RuntimeError("leaky detail " + running_session)
+
+    monkeypatch.setattr(routes.mcp, "handle", broken)
+    r = await client.post(MCP, json=INITIALIZE, headers=bearer(running_session))
+    assert r.status == 500
+    assert "leaky detail" not in await r.text()
+    assert "RuntimeError" in harness_logs.text
+    assert "leaky detail" not in harness_logs.text
+    assert running_session not in harness_logs.text
+
+
+async def test_nothing_about_an_mcp_request_reaches_the_log(client, running_session, harness_logs):
+    marked = {**TOOLS_CALL, "params": {"name": "get_nodes", "arguments": {"ids": ["MARKER-7"]}}}
+    await client.post(MCP, json=marked, headers=bearer(running_session))
+    await client.post(MCP, json=marked, headers=bearer("f" * 64))
+    await client.post(MCP, json=marked, headers={**bearer(running_session), "Origin": "o-mark"})
+    assert running_session not in harness_logs.text
+    assert "f" * 64 not in harness_logs.text
+    assert "MARKER-7" not in harness_logs.text
+    assert "o-mark" not in harness_logs.text
+    assert "bridge_refused" in harness_logs.text
+
+
+def bridge_refusals(logs):
+    return [
+        r.getMessage()
+        for r in logs.records
+        if r.levelno == logging.INFO and "bridge_refused" in r.getMessage()
+    ]
+
+
+async def test_a_bridge_refusal_logs_the_failed_checks_name_at_info(
+    client, running_session, clock, harness_logs
+):
+    cases = [
+        ({**bearer(running_session), "Origin": "o-mark"}, "browser_header:Origin"),
+        ({**bearer(running_session), "Cookie": "c=cookie-mark"}, "browser_header:Cookie"),
+        (
+            {**bearer(running_session), "Sec-Fetch-Site": "sfs-mark"},
+            "browser_header:Sec-Fetch-Site",
+        ),
+        ({}, "no_bearer"),
+        ({"Authorization": "Bearer  bad-mark"}, "bad_bearer"),
+        (bearer("f" * 64), "secret_mismatch"),
+    ]
+    for headers, check in cases:
+        r = await client.post(MCP, json=INITIALIZE, headers=headers)
+        await assert_bridge_refused(r)
+        assert bridge_refusals(harness_logs)[-1] == "bridge_refused: " + check
+    text = harness_logs.text
+    for mark in ("o-mark", "cookie-mark", "sfs-mark", "bad-mark", "f" * 64, running_session):
+        assert mark not in text
+
+
+async def test_a_bridge_refusal_without_a_bridge_logs_no_bridge(client, harness_logs):
+    await assert_bridge_refused(await client.post(MCP, json=INITIALIZE, headers=bearer("ab" * 32)))
+    assert bridge_refusals(harness_logs) == ["bridge_refused: no_bridge"]
+
+
+async def test_bridge_refusals_log_once_per_check_per_minute(
+    client, running_session, clock, harness_logs
+):
+    for _ in range(3):
+        await client.post(MCP, json=INITIALIZE, headers=bearer("f" * 64))
+    await client.post(MCP, json=INITIALIZE)
+    assert bridge_refusals(harness_logs) == [
+        "bridge_refused: secret_mismatch",
+        "bridge_refused: no_bearer",
+    ]
+    clock.advance(61)
+    await client.post(MCP, json=INITIALIZE, headers=bearer("f" * 64))
+    assert len(bridge_refusals(harness_logs)) == 3
+
+
+async def test_install_builds_the_bridge_and_hands_it_to_the_session(monkeypatch, tmp_path):
+    from harness.bridge import Bridge
+    from harness.routes import install
+
+    fake_folder_paths(monkeypatch, tmp_path / "user" / "__harness")
+    server = FakePromptServer()
+    deps = install(server)
+    assert isinstance(deps.bridge, Bridge)
+    assert deps.sessions is not None
+    assert deps.sessions._bridge is deps.bridge
+    assert deps.bridge._attached() is None  # no page holds a session yet
+    dirs = deps.bridge._output_dirs()
+    assert dirs == {kind: tmp_path / "user" / kind for kind in ("output", "temp", "input")}
+    assert "/harness/mcp" in {r.path for r in server.routes}
+
+
+async def test_install_off_linux_builds_no_bridge(monkeypatch, tmp_path):
+    from harness import routes
+
+    monkeypatch.setattr(routes, "_supported", lambda: False)
+    fake_folder_paths(monkeypatch, tmp_path / "user" / "__harness")
+    deps = routes.install(FakePromptServer())
+    assert deps.bridge is None and deps.sessions is None
