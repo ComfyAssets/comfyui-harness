@@ -5,6 +5,7 @@
 import { DEFAULTS, format, parse } from "./keys.js";
 import { revokeBrowser, setBridge, setBridgeEdits, setBridgeRuns, setEnabled } from "./client.js";
 import { TOKENS, css, styleButton } from "./style.js";
+import { setupCommand } from "./agents.js";
 
 export const IDS = {
   openKey: "Harness.OpenKey",
@@ -170,7 +171,7 @@ export function renderServerRows({ document, io, status, browsers = [], onPair =
     }
     return row;
   };
-  root.append(found(status.cli_found, status.cli_found ? "Claude Code found" : "Claude Code not found"));
+  root.append(...("agent_found" in status ? agentRows() : [found(status.cli_found, status.cli_found ? "Claude Code found" : "Claude Code not found")]));
   root.append(status.mcp_found ? found(true, "comfy-mcp found") : found(false, "comfy-mcp not found", MCP_HINT));
 
   const list = styled("div", undefined, { display: "flex", flexDirection: "column", gap: "8px", marginTop: "6px" });
@@ -204,6 +205,36 @@ export function renderServerRows({ document, io, status, browsers = [], onPair =
   root.append(...canvasRows());
   root.append(message);
   return root;
+
+  // The agent and folder chosen on the machine with pair.py --setup.
+  function agentRows() {
+    const name = String(status.agent_name ?? status.agent ?? "");
+    const code = (text) => styled("code", text, { fontFamily: TOKENS.mono, fontSize: "12px", padding: "1px 6px", borderRadius: "6px", background: TOKENS.input });
+    const wrap = () => styled("div", undefined, { display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap" });
+    const row = wrap();
+    row.append(make("span", status.agent_folder ? `Agent: ${name} in ${status.agent_folder}` : `Agent: ${name}`));
+    if (status.agent_found) {
+      row.append(styled("span", "✓ found", { color: "var(--success-text, #4ade80)", fontWeight: "700" }));
+    } else {
+      row.append(styled("span", "Install it with:", MUTED), code(String(status.agent_install ?? "")));
+    }
+    if (status.agent_choice === "default") row.append(styled("span", "(default)", MUTED));
+    if (status.agent_choice === "ignored") {
+      const why = status.agent_choice_reason ? `ignored: ${status.agent_choice_reason}` : "ignored";
+      row.append(styled("span", why, { color: "var(--error-text, #ff8080)" }));
+    } else if (status.agent_folder_ok === false) {
+      row.append(styled("span", "folder missing", { color: "var(--error-text, #ff8080)" }));
+    }
+    const change = wrap();
+    change.append(styled("span", "Change it with:", MUTED), code(setupCommand(status)));
+    const rows = [row, change];
+    if (status.agent_unprompted === true) {
+      rows.push(styled("p", `⚠ ${name} runs without asking`, { margin: "0", color: "var(--warning-text, #ffcc66)", fontWeight: "600" }));
+    } else if (status.agent_unprompted === null) {
+      rows.push(styled("p", `Not checked for ${name}: see its own approval settings`, { ...MUTED, margin: "0" }));
+    }
+    return rows;
+  }
 
   function canvasRows() {
     const heading = styled("h4", "Canvas", { margin: "6px 0 0", fontSize: "13px", fontWeight: "600" });

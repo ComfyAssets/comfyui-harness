@@ -604,3 +604,13 @@ def test_mcp_servers_returns_entries_and_writes_nothing(tmp_path):
     assert set(servers) == {"comfy-mcp", "canvas"}
     assert servers["canvas"]["headers"] == {"Authorization": "Bearer s"}
     assert list(tmp_path.glob("**/mcp.json")) == []
+
+
+def test_page_agent_table_matches_harness_table():
+    """web/agents.js keeps its own copy of the ids, names and install commands."""
+    import re
+
+    source = (Path(__file__).parents[2] / "web" / "agents.js").read_text()
+    rows = re.findall(r'\{ id: "([^"]+)", name: "([^"]+)", install: "([^"]+)" \}', source)
+
+    assert tuple(rows) == tuple((c.id, c.name, c.install) for c in CLIS.values())

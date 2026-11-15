@@ -2,6 +2,7 @@
 // Everything is built with createElement/textContent; server text may echo input.
 import { IDS, clamp } from "./settings.js";
 import { styleButton } from "./style.js";
+import { AGENTS, setupCommand } from "./agents.js";
 
 export const STOPPED_EVENTS = ["keydown", "keyup", "keypress", "paste", "copy", "cut", "wheel", "pointerdown", "mousedown", "contextmenu"];
 
@@ -26,10 +27,66 @@ const ACTION_LABELS = {
   start: "Start again",
   continue: "Start again and continue",
   use_here: "Use here",
+  check_again: "Check again",
 };
+
+const PATH_HINT =
+  "If it is installed and the terminal still says it is not, ComfyUI's PATH does not include its folder; " +
+  "add it to the PATH ComfyUI starts with.";
 
 const CLI_MISSING =
   "Claude Code (claude) was not found. The server looked in every directory on its PATH and in ~/.local/bin.";
+
+// The machine's choice of agent and folder (status fields from harness/cli.py status()).
+// An older server sends only cli_found.
+function agentView(status) {
+  if (!("agent_found" in status)) {
+    return status.cli_found === false ? { kind: "cli_missing", message: CLI_MISSING } : null;
+  }
+  const setup = setupCommand(status);
+  const check = { action: "check_again" };
+  if (status.agent_choice === "ignored") {
+    const why = status.agent_choice_reason ? `: ${status.agent_choice_reason}` : "";
+    return {
+      kind: "choice_ignored", message: `agent.json ignored${why}. Run pair.py --setup`,
+      commands: [{ label: "Choose again:", command: setup }], ...check,
+    };
+  }
+  if (status.agent_found === false) {
+    const others = Array.isArray(status.agents_installed) ? status.agents_installed : [];
+    if (others.length === 0) {
+      return {
+        kind: "no_agent", message: "No supported agent is installed on the ComfyUI machine.",
+        commands: [
+          ...AGENTS.map((a) => ({ label: `Install ${a.name}:`, command: a.install })),
+          { label: "Then choose it:", command: setup },
+        ],
+        hint: PATH_HINT, ...check,
+      };
+    }
+    return {
+      kind: "agent_missing", message: `${status.agent_name} is not installed on the ComfyUI machine.`,
+      commands: [
+        { label: "Install it there:", command: String(status.agent_install ?? "") },
+        { label: "Or choose another agent:", command: setup },
+      ],
+      hint: PATH_HINT, ...check,
+    };
+  }
+  if (status.agent_folder_ok === false) {
+    const folder = status.agent_folder || "The agent's folder";
+    return {
+      kind: "folder_missing", message: `${folder} no longer exists. Choose another with:`,
+      commands: [{ label: "Choose another folder:", command: setup }], ...check,
+    };
+  }
+  return null;
+}
+
+// True when the status stops the terminal from starting until something changes on the machine.
+export function blocksStart(status) {
+  return Boolean(status) && agentView(status) !== null;
+}
 
 function sessionView(session) {
   switch (session.state) {
@@ -59,7 +116,8 @@ export function viewFor({ status, socket, session, here }) {
   if (!status.enabled) return { kind: "disabled", message: "The terminal is switched off", action: "enable" };
   const fromSession = session ? sessionView(session) : null;
   if (fromSession) return fromSession;
-  if (status.cli_found === false) return { kind: "cli_missing", message: CLI_MISSING };
+  const fromAgent = agentView(status);
+  if (fromAgent) return fromAgent;
   if (socket === "lost") return { kind: "reconnecting", message: "Reconnecting..." };
   return { kind: "terminal" };
 }
@@ -68,7 +126,13 @@ function css(element, styles) {
   Object.assign(element.style, styles);
 }
 
-export function createPanel({ document, matchMedia = () => ({ matches: false }), onClose = () => {}, onAction = () => {} }) {
+export function createPanel({
+  document,
+  matchMedia = () => ({ matches: false }),
+  onClose = () => {},
+  onAction = () => {},
+  clipboard = globalThis.navigator?.clipboard,
+}) {
   const make = (tag, text) => {
     const el = document.createElement(tag);
     if (text !== undefined) el.textContent = text;
@@ -93,12 +157,14 @@ export function createPanel({ document, matchMedia = () => ({ matches: false }),
   css(header, { display: "flex", alignItems: "center", gap: "8px", padding: "2px 8px", flex: "0 0 auto" });
   const title = make("span", "claude");
   css(title, { fontWeight: "bold" });
+  const badge = make("span");
+  css(badge, { display: "none", color: "#ffcc66" });
   const notice = make("span");
   css(notice, { flex: "1 1 auto", display: "flex", gap: "8px", alignItems: "center" });
   const close = styleButton(make("button", "×"), "icon");
   close.setAttribute("aria-label", "Close terminal");
   close.addEventListener("click", () => onClose());
-  header.append(title, notice, close);
+  header.append(title, badge, notice, close);
 
   const errorLine = make("div");
   css(errorLine, { display: "none", padding: "2px 8px", color: "#ff8080" });
@@ -149,6 +215,12 @@ export function createPanel({ document, matchMedia = () => ({ matches: false }),
       return;
     }
     const parts = [make("p", view.message ?? "")];
+    if (Array.isArray(view.commands) && view.commands.length > 0) parts.push(commandList(view.commands));
+    if (view.hint) {
+      const hint = make("p", view.hint);
+      css(hint, { maxWidth: "640px", margin: "0", color: "#9098a8", textAlign: "center" });
+      parts.push(hint);
+    }
     if (view.action && ACTION_LABELS[view.action]) {
       const button = styleButton(make("button", ACTION_LABELS[view.action]), "primary");
       button.addEventListener("click", () => onAction(view.action));
@@ -156,6 +228,32 @@ export function createPanel({ document, matchMedia = () => ({ matches: false }),
     }
     overlay.replaceChildren(...parts);
     overlay.style.display = "flex";
+  }
+
+  function commandList(commands) {
+    const grid = make("div");
+    css(grid, { display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", gap: "6px 10px", alignItems: "center" });
+    for (const { label, command } of commands) {
+      const code = make("code", command);
+      css(code, { fontFamily: "monospace", padding: "2px 6px", background: "#1c1c28", wordBreak: "break-all", userSelect: "all" });
+      const copy = styleButton(make("button", "Copy"), "secondary");
+      copy.addEventListener("click", async () => {
+        try {
+          await clipboard?.writeText(command);
+        } catch {
+          // copying is a convenience; the command is on screen to select
+        }
+      });
+      grid.append(make("span", label), code, copy);
+    }
+    return grid;
+  }
+
+  function setAgent({ name, unprompted } = {}) {
+    if (name) title.textContent = name;
+    const warn = unprompted === true && name;
+    badge.textContent = warn ? `⚠ ${name} runs without asking` : "";
+    badge.style.display = warn ? "inline" : "none";
   }
 
   function notify(text, button) {
@@ -194,6 +292,7 @@ export function createPanel({ document, matchMedia = () => ({ matches: false }),
       element.style.opacity = String(clamp(IDS.opacity, percent) / 100);
     },
     show,
+    setAgent,
     notify,
     showError,
   };

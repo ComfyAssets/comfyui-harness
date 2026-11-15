@@ -17,6 +17,11 @@ export const BRIDGE_DISCLOSURE = [
   "Text inside a workflow (notes, titles, prompts) is read by the agent and can steer it.",
 ];
 
+// The same on every machine: an unpaired browser learns nothing about this one.
+export const AGENT_SENTENCE =
+  "After the code is accepted, the command asks which agent to run (Claude Code, Codex CLI, opencode or Copilot CLI) " +
+  "and which folder to start in. The agent may ask you to sign in the first time.";
+
 const POLL_MS = 2000;
 const COUNTDOWN_MS = 1000;
 const REJECTED_TEXT = "That code was not accepted. Request a new one.";
@@ -169,6 +174,7 @@ export function createPairingDialog({
       message("Run this on the machine running ComfyUI:"),
       commandRow("Command", pending.command),
       commandRow("Inside Docker", pending.docker_command),
+      styled("p", AGENT_SENTENCE, MUTED),
       styled("p", "Waiting for the code to be accepted...", MUTED),
       connection,
     );
