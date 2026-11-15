@@ -462,3 +462,34 @@ test("run is refused while a subgraph is open", async ({ page }) => {
   expect(refused.isError).toBe(true);
   expect(refused.text).toBe(IN_SUBGRAPH);
 });
+
+// PadImageNode is a core node with two dynamic combos: padding_type's option
+// decides which "padding_type.*" widgets the node has.
+test("a dynamic combo's widgets are set on a node made in the same batch, before and after a switch", async ({ page }) => {
+  const agent = await bridgeOn(page);
+  const edit = async (ops) => agent.call("edit", { fingerprint: (await read(agent)).fingerprint, summary: "Pad the image", ops });
+  const made = await edit([
+    { op: "add_node", ref: "pad", type: "PadImageNode" },
+    { op: "set_widget", node: "pad", widget: "padding_type.left", value: 8 },
+    { op: "set_widget", node: "pad", widget: "padding_style.feathering", value: 3 },
+  ]);
+  expect(made.isError).toBe(false);
+  const id = made.result.ids.pad;
+  let [node] = (await graphOf(page)).nodes.filter((n) => n.id === id);
+  expect(node.widgets).toMatchObject({ "padding_type": "pad dimensions", "padding_type.left": 8, "padding_style.feathering": 3 });
+
+  const switched = await edit([
+    { op: "add_node", ref: "pad2", type: "PadImageNode" },
+    { op: "set_widget", node: "pad2", widget: "padding_type", value: "pad by multiplier" },
+    { op: "set_widget", node: "pad2", widget: "padding_type.multiplier", value: 2.5 },
+    { op: "set_widget", node: id, widget: "padding_type", value: "pad to multiple" },
+    { op: "set_widget", node: id, widget: "padding_type.multiple", value: 64 },
+  ]);
+  expect(switched.isError).toBe(false);
+  const nodes = (await graphOf(page)).nodes;
+  [node] = nodes.filter((n) => n.id === id);
+  const [second] = nodes.filter((n) => n.id === switched.result.ids.pad2);
+  expect(second.widgets).toMatchObject({ "padding_type": "pad by multiplier", "padding_type.multiplier": 2.5 });
+  expect(node.widgets).toMatchObject({ "padding_type": "pad to multiple", "padding_type.multiple": 64 });
+  expect(Object.keys(node.widgets)).not.toContain("padding_type.left");
+});

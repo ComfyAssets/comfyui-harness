@@ -343,6 +343,20 @@ and `summary` (one line, shown to the author). Ops:
 `node`, `from`, `to` and `near` take an id as printed by the read tools, or a
 `ref` from an earlier `add_node` in the same batch.
 
+A dynamic combo (`COMFY_DYNAMICCOMBO_V3`) takes one of its option keys, and
+the chosen option's inputs are widgets named `<combo>.<input>`, as the read
+tools print them. The batch is checked against the widgets each node will
+have at that op: a node made in the batch has its default option's widgets
+(the input's `default`, else the first option), and a combo set earlier in
+the batch, on a new or an existing node, swaps its old option's widgets for
+the new option's. A switch rebuilds the node's inputs too, in the page's own
+order, so `connect` to and `disconnect` from that node's inputs are refused
+for the rest of the batch; the agent wires them in a separate edit after
+reading the node. A value that is not an option key is no switch. Limits: a
+dynamic combo nested inside an option is not expanded, and a new node's
+input list is predicted from its definition's top-level inputs, without the
+widget inputs a dynamic combo adds.
+
 Result of an edit that applied: `applied: true`, the new `fingerprint`,
 `ids` (ref to new node id), and for every `set_widget` the value the widget
 holds after the write (`widgets`). If it differs from what was asked, that op

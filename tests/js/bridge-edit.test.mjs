@@ -69,6 +69,39 @@ const TYPES = {
     inputs: { value: { name: "value", type: "BOOLEAN", default: false } },
     outputs: [{ index: 0, name: "BOOLEAN", type: "BOOLEAN" }],
   },
+  // A dynamic combo, as the real frontend 1.59.1 reports it: options keep
+  // ComfyUI's raw form, { key, inputs: { required: { name: [TYPE, opts] } } }.
+  PadImageNode: {
+    display_name: "Pad Image",
+    inputs: {
+      image: { name: "image", type: "IMAGE" },
+      padding_type: {
+        name: "padding_type",
+        type: "COMFY_DYNAMICCOMBO_V3",
+        options: [
+          { key: "pad dimensions", inputs: { required: {
+            left: ["INT", { default: 0, min: 0, max: 16384, step: 1 }],
+            top: ["INT", { default: 0, min: 0, max: 16384, step: 1 }],
+          } } },
+          { key: "pad by multiplier", inputs: { required: { multiplier: ["FLOAT", { default: 1, min: 1, max: 8, step: 0.01 }] } } },
+          { key: "pad to multiple", inputs: { required: { multiple: ["INT", { default: 32, min: 1, max: 16384 }] } } },
+        ],
+      },
+      padding_style: {
+        name: "padding_style",
+        type: "COMFY_DYNAMICCOMBO_V3",
+        options: [
+          { key: "color", inputs: { required: {
+            color: ["COLOR", { default: "#000000", socketless: true }],
+            feathering: ["INT", { default: 0, min: 0, max: 16384 }],
+          } } },
+          { key: "mirror image", inputs: { required: {} } },
+          { key: "edge", inputs: { required: { mode: [["clamp", "wrap"], {}] }, optional: { blur: ["BOOLEAN", { default: false }] } } },
+        ],
+      },
+    },
+    outputs: [{ index: 0, name: "image", type: "IMAGE" }],
+  },
   PrimitiveNode: {
     display_name: "Primitive",
     inputs: {},
@@ -276,6 +309,144 @@ test("a valid batch passes validateOps without throwing", () => {
     { op: "set_widget", node: "a", widget: "denoise", value: 0.5 },
     { op: "connect", from: 1, output: "LATENT", to: "a", input: "latent_image" },
     { op: "set_widget", node: 12, widget: "scheduler", value: "karras" },
+  ]);
+});
+
+// A live PadImageNode as the frontend builds it: the chosen option's inputs
+// are widgets named "<combo>.<input>".
+function padCanvas() {
+  return fakeGraph({
+    nodes: [
+      { id: 40, type: "PadImageNode", pos: [0, 0], size: [270, 226],
+        widgets: [
+          { name: "padding_type", type: "combo", value: "pad dimensions",
+            options: { values: ["pad dimensions", "pad by multiplier", "pad to multiple"] } },
+          { name: "padding_type.left", type: "number", value: 0, options: { min: 0, max: 16384 } },
+          { name: "padding_type.top", type: "number", value: 0, options: { min: 0, max: 16384 } },
+          { name: "padding_style", type: "combo", value: "color", options: { values: ["color", "mirror image", "edge"] } },
+          { name: "padding_style.color", type: "color", value: "#000000", options: {} },
+          { name: "padding_style.feathering", type: "number", value: 0, options: { min: 0, max: 16384 } },
+        ],
+        inputs: [{ name: "image", type: "IMAGE" }],
+        outputs: [{ name: "image", type: "IMAGE" }] },
+    ],
+    links: [],
+  });
+}
+
+const PAD_WIDGETS = "padding_type, padding_type.left, padding_type.top, padding_style, padding_style.color, padding_style.feathering";
+const escaped = (text) => text.replace(/[.()]/g, "\\$&");
+
+test("a new node's dynamic combo offers its option keys and the default option's widgets", () => {
+  validateOps(padCanvas(), TYPES, [
+    { op: "add_node", ref: "pad", type: "PadImageNode" },
+    { op: "set_widget", node: "pad", widget: "padding_type.left", value: 8 },
+    { op: "set_widget", node: "pad", widget: "padding_style.color", value: "#ff0000" },
+    { op: "set_widget", node: "pad", widget: "padding_style.feathering", value: 4 },
+    { op: "set_widget", node: "pad", widget: "padding_type", value: "pad to multiple" },
+  ]);
+});
+
+test("a new node's dynamic combo sub-widget keeps its range", () => {
+  const err = refusal(() => validateOps(padCanvas(), TYPES, [
+    { op: "add_node", ref: "pad", type: "PadImageNode" },
+    { op: "set_widget", node: "pad", widget: "padding_type.left", value: -1 },
+  ]));
+  assert.equal(err.message, 'Op 2 (set_widget): widget "padding_type.left" of new node "pad" takes a number from 0 to 16384.');
+});
+
+test("a dynamic combo takes only its option keys", () => {
+  const err = refusal(() => validateOps(padCanvas(), TYPES, [
+    { op: "add_node", ref: "pad", type: "PadImageNode" },
+    { op: "set_widget", node: "pad", widget: "padding_type", value: "pad by" },
+  ]));
+  assert.equal(err.message, 'Op 2 (set_widget): widget "padding_type" of new node "pad" takes one of: pad dimensions, pad by multiplier, pad to multiple.');
+});
+
+test("a widget a new node does not have lists its dynamic sub-widgets", () => {
+  const err = refusal(() => validateOps(padCanvas(), TYPES, [
+    { op: "add_node", ref: "pad", type: "PadImageNode" },
+    { op: "set_widget", node: "pad", widget: "padding_type.multiplier", value: 2 },
+  ]));
+  assert.equal(err.message, `Op 2 (set_widget): new node "pad" has no widget "padding_type.multiplier". Its widgets are: ${PAD_WIDGETS}.`);
+});
+
+test("after a new node's combo is switched, the chosen option's widgets replace the old ones", () => {
+  const ops = [
+    { op: "add_node", ref: "pad", type: "PadImageNode" },
+    { op: "set_widget", node: "pad", widget: "padding_type", value: "pad by multiplier" },
+    { op: "set_widget", node: "pad", widget: "padding_type.multiplier", value: 2.5 },
+  ];
+  validateOps(padCanvas(), TYPES, ops);
+  const err = refusal(() => validateOps(padCanvas(), TYPES, [...ops, { op: "set_widget", node: "pad", widget: "padding_type.left", value: 1 }]));
+  assert.equal(err.message, 'Op 4 (set_widget): new node "pad" has no widget "padding_type.left". ' +
+    "Its widgets are: padding_type, padding_type.multiplier, padding_style, padding_style.color, padding_style.feathering.");
+});
+
+test("a switched option's widgets include its optional inputs and plain combos", () => {
+  validateOps(padCanvas(), TYPES, [
+    { op: "add_node", ref: "pad", type: "PadImageNode" },
+    { op: "set_widget", node: "pad", widget: "padding_style", value: "edge" },
+    { op: "set_widget", node: "pad", widget: "padding_style.mode", value: "wrap" },
+    { op: "set_widget", node: "pad", widget: "padding_style.blur", value: true },
+  ]);
+  const err = refusal(() => validateOps(padCanvas(), TYPES, [
+    { op: "add_node", ref: "pad", type: "PadImageNode" },
+    { op: "set_widget", node: "pad", widget: "padding_style", value: "edge" },
+    { op: "set_widget", node: "pad", widget: "padding_style.mode", value: "mirror" },
+  ]));
+  assert.match(err.message, new RegExp(`${escaped("takes one of: clamp, wrap.")}$`));
+});
+
+test("after a live node's combo is switched in the batch, the new option's widgets can be set", () => {
+  const ops = [
+    { op: "set_widget", node: 40, widget: "padding_type", value: "pad by multiplier" },
+    { op: "set_widget", node: 40, widget: "padding_type.multiplier", value: 2 },
+  ];
+  validateOps(padCanvas(), TYPES, ops);
+  const before = refusal(() => validateOps(padCanvas(), TYPES, [ops[1]]));
+  assert.equal(before.message, `Op 1 (set_widget): node #40 has no widget "padding_type.multiplier". Its widgets are: ${PAD_WIDGETS}.`);
+  const after = refusal(() => validateOps(padCanvas(), TYPES, [...ops, { op: "set_widget", node: 40, widget: "padding_type.top", value: 1 }]));
+  assert.equal(after.message, 'Op 3 (set_widget): node #40 has no widget "padding_type.top". ' +
+    "Its widgets are: padding_type, padding_type.multiplier, padding_style, padding_style.color, padding_style.feathering.");
+});
+
+test("a node's inputs cannot be wired in the batch that switched its dynamic combo", () => {
+  const graph = padCanvas();
+  for (const op of [
+    { op: "connect", from: 40, output: 0, to: 40, input: "image" },
+    { op: "disconnect", node: 40, input: "image" },
+  ]) {
+    const err = refusal(() => validateOps(graph, TYPES, [
+      { op: "set_widget", node: 40, widget: "padding_type", value: "pad by multiplier" },
+      op,
+    ]));
+    assert.equal(err.message, `Op 2 (${op.op}): node #40's inputs change when "padding_type" is switched by op 1. ` +
+      "Wire its inputs in a separate edit, after reading the node again.");
+  }
+  // Its outputs do not change.
+  validateOps(graph, TYPES, [
+    { op: "add_node", ref: "view", type: "PreviewImage" },
+    { op: "set_widget", node: 40, widget: "padding_type", value: "pad by multiplier" },
+    { op: "connect", from: 40, output: 0, to: "view", input: "images" },
+  ]);
+});
+
+test("a ref spelled like a node id does not share that node's switches", () => {
+  validateOps(padCanvas(), TYPES, [
+    { op: "add_node", ref: "#40", type: "PadImageNode" },
+    { op: "set_widget", node: "#40", widget: "padding_type", value: "pad by multiplier" },
+    { op: "set_widget", node: 40, widget: "padding_type.left", value: 3 },
+  ]);
+});
+
+test("a dynamic combo given no option key keeps its widgets", () => {
+  // A live combo whose values cannot be read accepts any value; no switch follows from it.
+  const graph = padCanvas();
+  findNode(graph, "40").widgets[0].options = {};
+  validateOps(graph, TYPES, [
+    { op: "set_widget", node: 40, widget: "padding_type", value: "something else" },
+    { op: "set_widget", node: 40, widget: "padding_type.left", value: 3 },
   ]);
 });
 
