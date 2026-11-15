@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from harness.store import SCHEMA, Browser, State, Store, StoreError
+from unittest import mock
+
+from harness.store import SCHEMA, AgentChoice, Browser, State, Store, StoreError
 
 
 def opened(tmp_path: Path) -> Store:
@@ -91,6 +93,8 @@ def test_browsers_round_trip_with_spec_layout(tmp_path):
         "bridge_enabled",
         "bridge_edits",
         "bridge_runs",
+        "last_agent",
+        "last_folder",
     }
     assert set(raw["browsers"][0]) == {
         "id",
@@ -377,3 +381,150 @@ def test_bridge_switches_survive_a_reopen(tmp_path):
     reopened = Store(tmp_path)
     reopened.open()
     assert bridge_switches(reopened.state) == (True, False, True)
+
+
+def test_last_agent_and_folder_default_empty_and_round_trip(tmp_path):
+    store = opened(tmp_path)
+    assert (store.state.last_agent, store.state.last_folder) == ("", "")
+    store.update(lambda s: dataclasses.replace(s, last_agent="codex", last_folder="/x"))
+    reopened = Store(tmp_path)
+    reopened.open()
+    assert (reopened.state.last_agent, reopened.state.last_folder) == ("codex", "/x")
+
+
+@pytest.mark.parametrize("key", ("last_agent", "last_folder"))
+def test_a_last_choice_that_is_not_a_string_is_a_bad_state(tmp_path, key):
+    opened(tmp_path)
+    write_state_file(
+        tmp_path,
+        {"schema": SCHEMA, "instance_id": "a", "enabled": True, "browsers": [], key: 3},
+    )
+    with pytest.raises(StoreError) as e:
+        Store(tmp_path).open()
+    assert e.value.code == "bad_state"
+
+
+def write_choice(data_dir: Path, content: object, mode: int = 0o600) -> Path:
+    p = data_dir / "agent.json"
+    p.write_text(content if isinstance(content, str) else json.dumps(content))
+    p.chmod(mode)
+    return p
+
+
+def choice(tmp_path: Path, default: Path) -> AgentChoice:
+    return opened(tmp_path).agent_choice(default)
+
+
+def test_no_agent_file_means_claude_in_the_default_folder(tmp_path):
+    default = tmp_path / "base"
+    assert choice(tmp_path / "d", default) == AgentChoice("claude", default, "default", "")
+
+
+def test_a_valid_agent_file_is_saved(tmp_path):
+    folder = tmp_path / "work"
+    folder.mkdir()
+    store = opened(tmp_path / "d")
+    write_choice(store.data_dir, {"agent": "codex", "folder": str(folder)})
+    assert store.agent_choice(tmp_path) == AgentChoice("codex", folder, "saved", "")
+
+
+def test_a_folder_that_is_a_symlink_to_a_directory_is_saved(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    store = opened(tmp_path / "d")
+    write_choice(store.data_dir, {"agent": "opencode", "folder": str(link)})
+    assert store.agent_choice(tmp_path).source == "saved"
+
+
+def test_the_file_is_read_again_on_every_call(tmp_path):
+    store = opened(tmp_path / "d")
+    assert store.agent_choice(tmp_path).source == "default"
+    write_choice(store.data_dir, {"agent": "copilot", "folder": str(tmp_path)})
+    assert store.agent_choice(tmp_path).agent == "copilot"
+
+
+def ignored(tmp_path: Path, content: object, **kw: object) -> AgentChoice:
+    store = opened(tmp_path / "d")
+    write_choice(store.data_dir, content, **kw)  # type: ignore[arg-type]
+    result = store.agent_choice(tmp_path)
+    assert result.source == "ignored"
+    assert (result.agent, result.folder) == ("claude", tmp_path)
+    return result
+
+
+def test_an_unknown_agent_is_ignored(tmp_path):
+    r = ignored(tmp_path, {"agent": "pi", "folder": str(tmp_path)})
+    assert r.reason == 'unknown agent "pi"'
+
+
+def test_a_long_unknown_agent_name_is_cut_in_the_reason(tmp_path):
+    r = ignored(tmp_path, {"agent": "x" * 500, "folder": str(tmp_path)})
+    assert len(r.reason) < 80
+
+
+def test_a_relative_folder_is_ignored(tmp_path):
+    r = ignored(tmp_path, {"agent": "codex", "folder": "work"})
+    assert r.reason == "folder must be a full path"
+
+
+def test_a_missing_folder_is_ignored(tmp_path):
+    gone = str(tmp_path / "gone")
+    r = ignored(tmp_path, {"agent": "codex", "folder": gone})
+    assert r.reason == f"folder does not exist: {gone}"
+
+
+def test_a_folder_that_is_a_file_is_ignored(tmp_path):
+    f = tmp_path / "f"
+    f.write_text("x")
+    r = ignored(tmp_path, {"agent": "codex", "folder": str(f)})
+    assert r.reason == f"folder does not exist: {f}"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "not json",
+        "[1]",
+        '{"agent": "codex", "folder": NaN}',
+        {"agent": "codex"},
+        {"folder": "/"},
+        {"agent": "codex", "folder": "/", "extra": 1},
+        {"agent": 3, "folder": "/"},
+        {"agent": "codex", "folder": None},
+    ],
+)
+def test_a_malformed_agent_file_is_ignored(tmp_path, content):
+    r = ignored(tmp_path, content)
+    assert r.reason and "codex" not in r.reason
+
+
+def test_an_agent_file_with_loose_permissions_is_ignored(tmp_path):
+    r = ignored(tmp_path, {"agent": "codex", "folder": str(tmp_path)}, mode=0o644)
+    assert "accessible by other accounts" in r.reason
+
+
+def test_an_agent_file_that_is_a_symlink_is_ignored(tmp_path):
+    store = opened(tmp_path / "d")
+    target = tmp_path / "target.json"
+    target.write_text(json.dumps({"agent": "codex", "folder": str(tmp_path)}))
+    target.chmod(0o600)
+    (store.data_dir / "agent.json").symlink_to(target)
+    r = store.agent_choice(tmp_path)
+    assert r.source == "ignored" and "symbolic link" in r.reason
+
+
+def test_an_agent_file_owned_by_someone_else_is_ignored(tmp_path):
+    store = opened(tmp_path / "d")
+    write_choice(store.data_dir, {"agent": "codex", "folder": str(tmp_path)})
+    real = os.geteuid()
+    calls = iter([real])  # the data directory check passes, the file check sees a stranger
+    with mock.patch("harness.store.os.geteuid", lambda: next(calls, real + 1)):
+        r = store.agent_choice(tmp_path)
+    assert r.source == "ignored" and "another owner" in r.reason
+
+
+def test_an_oversize_agent_file_is_ignored(tmp_path):
+    r = ignored(tmp_path, " " * (1024 * 1024 + 1))
+    assert r.reason == "file is too large"

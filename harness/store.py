@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, TypeVar
 
+from .cli import CLIS
+
 SCHEMA = 1
 KEY_BYTES = 32
 INSTANCE_ID_BYTES = 4
@@ -17,6 +19,9 @@ DIR_MODE = 0o700
 FILE_MODE = 0o600
 OTHERS_MASK = 0o077
 MAX_STATE_BYTES = 1024 * 1024
+AGENT_FILE = "agent.json"
+DEFAULT_AGENT = "claude"
+MAX_REASON_ECHO = 40
 LOAD_ATTEMPTS = 3
 _SYMLINK_ERRNOS = (errno.ELOOP, errno.ENOTDIR, errno.EMLINK)
 
@@ -52,9 +57,20 @@ class State:
     bridge_enabled: bool = False
     bridge_edits: bool = True
     bridge_runs: bool = False
+    last_agent: str = ""
+    last_folder: str = ""
+
+
+@dataclass(frozen=True)
+class AgentChoice:
+    agent: str
+    folder: Path
+    source: str  # "saved", "default" or "ignored"
+    reason: str  # empty unless ignored
 
 
 _BRIDGE_DEFAULTS = (("bridge_enabled", False), ("bridge_edits", True), ("bridge_runs", False))
+_LAST_FIELDS = ("last_agent", "last_folder")
 _BROWSER_STR_FIELDS = ("id", "token_sha256", "origin", "label")
 _BROWSER_NUM_FIELDS = ("created", "last_seen", "acknowledged")
 
@@ -99,12 +115,17 @@ def _parse_state(raw: Any) -> State:
     for name, value in bridge.items():
         if not isinstance(value, bool):
             raise ValueError(f"{name} is not a boolean")
+    last = {name: raw.get(name, "") for name in _LAST_FIELDS}
+    for name, value in last.items():
+        if not isinstance(value, str):
+            raise ValueError(f"{name} is not a string")
     return State(
         schema=SCHEMA,
         instance_id=raw["instance_id"],
         enabled=raw["enabled"],
         browsers=tuple(_parse_browser(item) for item in browsers),
         **bridge,
+        **last,
     )
 
 
@@ -143,6 +164,10 @@ def _check_owner_only(path: Path, st: os.stat_result, what: str) -> None:
         )
 
 
+class _ChoiceError(ValueError):
+    """agent.json holds a choice the harness will not accept."""
+
+
 class Store:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir
@@ -179,6 +204,48 @@ class Store:
             self._atomic_write(dir_fd, self.state_path.name, self._encode(new_state))
         self._state = new_state
         return new_state
+
+    def agent_choice(self, default_folder: Path) -> AgentChoice:
+        """Read agent.json afresh. A bad file is reported, never replaced by a default."""
+        with self._directory(create=False) as dir_fd:
+            path = self.data_dir / AGENT_FILE
+            try:
+                data = self._read_private(dir_fd, path)
+            except StoreError as exc:
+                return self._ignored(default_folder, str(exc))
+        if data is None:
+            return AgentChoice(DEFAULT_AGENT, default_folder, "default", "")
+        reason = ""
+        try:
+            if len(data) > MAX_STATE_BYTES:
+                raise _ChoiceError("file is too large")
+            raw = json.loads(data.decode("utf-8"), parse_constant=_reject_constant)
+            agent, folder = self._parse_agent_choice(raw)
+            return AgentChoice(agent, folder, "saved", "")
+        except _ChoiceError as exc:
+            reason = str(exc)
+        except (ValueError, OverflowError, RecursionError):
+            reason = "file is not valid JSON with agent and folder"
+        return self._ignored(default_folder, reason)
+
+    @staticmethod
+    def _ignored(default_folder: Path, reason: str) -> AgentChoice:
+        return AgentChoice(DEFAULT_AGENT, default_folder, "ignored", reason)
+
+    @staticmethod
+    def _parse_agent_choice(raw: Any) -> tuple[str, Path]:
+        if not isinstance(raw, dict) or set(raw) != {"agent", "folder"}:
+            raise _ChoiceError("file must hold exactly agent and folder")
+        agent, folder = raw["agent"], raw["folder"]
+        if not isinstance(agent, str) or not isinstance(folder, str):
+            raise _ChoiceError("agent and folder must be strings")
+        if agent not in CLIS:
+            raise _ChoiceError(f'unknown agent "{agent[:MAX_REASON_ECHO]}"')
+        if not os.path.isabs(folder):
+            raise _ChoiceError("folder must be a full path")
+        if not os.path.isdir(folder):
+            raise _ChoiceError(f"folder does not exist: {folder}")
+        return agent, Path(folder)
 
     @contextmanager
     def _directory(self, create: bool) -> Iterator[int]:
