@@ -207,7 +207,7 @@ GET, `Sec-Fetch-Site: same-origin`. Everything else is **unpaired**.
 
 | Route | Method | Unpaired | Paired | Body in, body out |
 |---|---|---|---|---|
-| `/harness/status` | GET | yes | yes | out: `{supported, paired, enabled}`; paired callers also get `{cli_found, mcp_found, session, origin}` (origin: the address this browser paired from) and the bridge fields `{bridge_enabled, bridge_edits, bridge_runs, bridge_available, bridge_reason, bridge_live}` (bridge spec 9) |
+| `/harness/status` | GET | yes | yes | out: `{supported, paired, enabled}`; paired callers also get `{cli_found, mcp_found, playwriter_found, session, origin}` (playwriter_found: the optional Playwriter CLI is on ComfyUI's PATH or in `~/.local/bin`; origin: the address this browser paired from) and the bridge fields `{bridge_enabled, bridge_edits, bridge_runs, bridge_available, bridge_reason, bridge_live}` (bridge spec 9) |
 | `/harness/pair/request` | POST | yes | yes | out: `{code, poll_secret, expires_in, command, docker_command}` |
 | `/harness/pair/poll` | POST | yes | yes | header `X-Harness-Poll`; out: `{state: waiting, rejected, expired, paired}` |
 | `/harness/pair/browsers` | GET | no | yes | out: list of `{id, label, origin, created, last_seen, current}` |
