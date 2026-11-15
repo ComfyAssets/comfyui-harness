@@ -414,7 +414,8 @@ app.extensionManager = {
     _s: new Map([
       ["nodeDef", { nodeDefsByName: NODE_DEFS }],
       ["execution", { activeJobId: null, executingNodeId: null }],
-      ["queuePendingTaskCount", { count: 0 }],
+      // A queued prompt stays pending until it is cancelled, so a run notice stays up.
+      ["queuePendingTaskCount", { get count() { return stub.queued.length - stub.cancelled.length; } }],
       ["executionError", { lastPromptError: null }],
     ]),
   },

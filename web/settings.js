@@ -245,7 +245,8 @@ export function renderServerRows({ document, io, status, browsers = [], onPair =
       row("Allow edits", status.bridge_edits, (input) => act(() => setBridgeEdits(io, Boolean(input.checked))),
         "When off, the agent can read the canvas but not change it."),
       row("Allow runs", status.bridge_runs, (input) => act(() => setBridgeRuns(io, Boolean(input.checked))),
-        "Lets the agent press Run when you ask it to. A run uses your GPU and writes output files, and cannot be undone."),
+        "Lets the agent press Run when you ask it to. A run uses your GPU and writes output files, and cannot be undone. " +
+          "Asking first is an instruction to the agent, not a check. Keep this off for a hard stop."),
       styled("p", "These are settings the harness honours. They do not restrain the agent itself, which runs as your account.", MUTED),
     );
     return rows;

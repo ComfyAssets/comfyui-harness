@@ -26,13 +26,13 @@ const TOO_LARGE = "That is too much to send at once. Ask for fewer nodes or a sm
 const UNKNOWN_COMMAND = "Unknown command.";
 const TYPES_OR_SEARCH = "Give either types or search, not both.";
 const IN_SUBGRAPH = "Close the subgraph to run the whole workflow, or press Run yourself.";
-const NOT_QUEUED ="ComfyUI did not queue the prompt.";
+const NOT_QUEUED = "ComfyUI did not queue the prompt.";
 const SUMMARY_CHARS = 200;
 const TRACEBACK_LINES = 20;
 // Room for the envelope around a result: {"type":"bridge_reply","rid":"<32 hex>","ok":true,"result":...}.
 const REPLY_OVERHEAD = 256;
-// How often a shown Undo notice re-checks that it still applies, besides on
-// every bridge command and the page's own graphChanged event.
+// How often a shown Undo or run notice re-checks that it still applies, besides
+// on every bridge command and the page's own graphChanged event.
 export const NOTICE_CHECK_MS = 1000;
 
 // ------------------------------------------------- shaping the host's data
@@ -190,7 +190,7 @@ function editNotice(summary, counts) {
 // ------------------------------------------------------------- bridge
 
 export function createBridge({ host, notify, setInterval: every = () => null, clearInterval: stopEvery = () => {} }) {
-  let watch = null; // the shown Undo notice: { tracker, mark, fp, clear, timer }
+  let watch = null; // the shown Undo or run notice: { valid(), clear, timer }
 
   const identity = () => host.identity();
   const current = () => fingerprint(host.graph(), identity());
@@ -209,18 +209,52 @@ export function createBridge({ host, notify, setInterval: every = () => null, cl
     shown?.clear?.();
   }
 
-  // Removes the Undo notice once the edit is no longer the newest undo step,
-  // or the canvas is no longer the one edited (any structural change or a
-  // workflow tab switch moves the fingerprint).
+  // Removes the shown notice once it no longer applies: an Undo notice once
+  // the edit is no longer the newest undo step or the canvas is no longer the
+  // one edited (any structural change or a workflow tab switch moves the
+  // fingerprint); a run notice once the run is over.
   function check() {
     if (!watch) return;
     let stillValid = false;
     try {
-      stillValid = watch.tracker.isLatest(watch.mark) && current() === watch.fp;
+      stillValid = watch.valid();
     } catch {
       stillValid = false;
     }
     if (!stillValid) dropNotice();
+  }
+
+  function keep(clear, valid, onTick = () => {}) {
+    watch = { valid, clear, timer: null };
+    const own = watch;
+    watch.timer = every(() => {
+      if (watch !== own) return;
+      onTick();
+      check();
+    }, NOTICE_CHECK_MS);
+  }
+
+  // The run's state as the page's queue shows it. Right after queuing the
+  // queue may not show the run yet, so "idle" means over only once the run
+  // was seen queued or running, or after the first timed check.
+  function runWatch() {
+    let busySeen = false;
+    let ticks = 0;
+    const idle = () => {
+      try {
+        return text(host.runState()?.state) === "idle";
+      } catch {
+        return false; // unknown: treat the run as still going
+      }
+    };
+    const over = () => {
+      if (!idle()) {
+        busySeen = true;
+        return false;
+      }
+      return busySeen || ticks > 0;
+    };
+    return { over, idle, tick: () => ticks++ };
   }
 
   function show(textLine, button) {
@@ -278,10 +312,7 @@ export function createBridge({ host, notify, setInterval: every = () => null, cl
       .map((w) => ({ op: w.op, node: w.node, widget: w.widget, asked: w.asked, now: w.now }));
     const recorded = mark !== before;
     const clear = show(editNotice(args.summary, out.counts), recorded ? undoButton(tracker, mark) : undefined);
-    if (recorded) {
-      watch = { tracker, mark, fp, clear, timer: null };
-      watch.timer = every(check, NOTICE_CHECK_MS);
-    }
+    if (recorded) keep(clear, () => tracker.isLatest(mark) && current() === fp);
     return {
       applied: true,
       fingerprint: fp,
@@ -302,16 +333,20 @@ export function createBridge({ host, notify, setInterval: every = () => null, cl
       return { queued: false, errors: outcome?.errors ?? refusalFrom(null, null) };
     }
     const promptId = outcome.prompt_id;
-    show("Claude queued a run", {
+    const state = runWatch();
+    const clear = show("Claude queued a run", {
       label: "Cancel",
       onClick: async () => {
+        forget();
+        if (state.over()) return; // the run has finished: nothing to cancel
         try {
           await host.cancel(promptId);
         } catch {
-          show("The run could not be cancelled.");
+          if (!state.idle()) show("The run could not be cancelled.");
         }
       },
     });
+    keep(clear, () => !state.over(), state.tick);
     return { queued: true, prompt_id: promptId, number: outcome.number };
   }
 

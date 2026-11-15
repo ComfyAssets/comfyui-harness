@@ -335,12 +335,22 @@ export function createHarness({
     session = { state: "running" };
   }
 
-  // Answers on the socket the request came in on. Results and errors are
-  // never logged: they hold canvas content.
-  async function answerBridge(message) {
-    const { rid } = message;
-    if (typeof rid !== "string") return;
+  // Bridge commands run one at a time on the page: a command never starts
+  // while an earlier one (such as an edit's rollback awaiting undo or
+  // restore) is still running. The server sends one call at a time, but it
+  // stops waiting on a timeout or a closed socket and sends the next.
+  let bridgeChain = Promise.resolve();
+  function answerBridge(message) {
+    if (typeof message.rid !== "string") return;
     const from = socket;
+    // A send to a socket that has gone must not stop every later command.
+    bridgeChain = bridgeChain.then(() => answerOne(message, from)).catch(() => {});
+  }
+
+  // Answers on the socket the request came in on. Results and errors are
+  // never logged: they hold canvas content. Never rejects.
+  async function answerOne(message, from) {
+    const { rid } = message;
     let reply;
     try {
       const result = await bridge.handle(message.cmd, message.args);

@@ -658,6 +658,49 @@ test("an edit from the bridge shows its notice in the panel with Undo", async ()
   assert.ok(byText(env.panel.element, "Undo", "BUTTON"));
 });
 
+test("a bridge command waits until an earlier edit's rollback has finished", async () => {
+  const host = bridgeHost();
+  const tracker = host.tracker();
+  const realUndo = tracker.undo.bind(tracker);
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  tracker.undo = async () => {
+    await gate; // a slow undo: the rollback is still running
+    return realUndo();
+  };
+  host.createNode = () => {
+    throw new Error("page broke");
+  };
+  const env = await openReady({ host });
+  const ws = env.socket();
+  ws.receive({ type: "bridge", rid: "o1", cmd: "get_outline", args: {} });
+  await flush();
+  const { fingerprint } = replies(ws)[0].result;
+  const ops = [{ op: "set_title", node: 1, title: "Hi" }, { op: "add_node", ref: "n", type: "Note" }];
+  ws.receive({ type: "bridge", rid: "e1", cmd: "edit", args: { fingerprint, summary: "x", ops } });
+  ws.receive({ type: "bridge", rid: "o2", cmd: "get_outline", args: {} });
+  await flush();
+  assert.deepEqual(replies(ws).map((r) => r.rid), ["o1"], "nothing answered while the rollback runs");
+  release();
+  await flush();
+  const after = replies(ws);
+  assert.deepEqual(after.map((r) => r.rid), ["o1", "e1", "o2"]);
+  assert.equal(after[1].ok, false);
+  assert.equal(after[2].ok, true);
+  assert.equal(after[2].result.fingerprint, fingerprint, "the outline reads the rolled-back canvas");
+});
+
+test("a failing bridge command does not stop the ones after it", async () => {
+  const env = await openReady({ host: bridgeHost() });
+  const ws = env.socket();
+  ws.receive({ type: "bridge", rid: "a", cmd: "nope", args: {} });
+  ws.receive({ type: "bridge", rid: "b", cmd: "get_errors", args: {} });
+  await flush();
+  assert.deepEqual(replies(ws).map((r) => [r.rid, r.ok]), [["a", false], ["b", true]]);
+});
+
 // ------------------------------------------------------- the real host's run
 
 // A stand-in for ComfyApp in 1.59.1: app.queuePrompt drains every queued

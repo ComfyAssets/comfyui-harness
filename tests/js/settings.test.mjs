@@ -237,7 +237,7 @@ test("the Canvas rows show a heading, three switches and the honesty line", () =
   assert.equal(switchFor(el, "Allow edits").checked, true);
   assert.equal(switchFor(el, "Allow runs").checked, false);
   assert.ok(byText(el, "When off, the agent can read the canvas but not change it."));
-  assert.ok(byText(el, "Lets the agent press Run when you ask it to. A run uses your GPU and writes output files, and cannot be undone."));
+  assert.ok(byText(el, "Lets the agent press Run when you ask it to. A run uses your GPU and writes output files, and cannot be undone. Asking first is an instruction to the agent, not a check. Keep this off for a hard stop."));
   assert.ok(byText(el, "These are settings the harness honours. They do not restrain the agent itself, which runs as your account."));
 });
 

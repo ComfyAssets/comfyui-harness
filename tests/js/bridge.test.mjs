@@ -504,8 +504,68 @@ test("Cancel calls host.cancel with the prompt id", async () => {
 test("a run notice replaces an edit notice and stops its checks", async () => {
   const env = setup();
   await editOnce(env);
+  const editTimers = [...env.timers.keys()];
   await env.bridge.handle("run", { fingerprint: env.fp() });
+  assert.equal(env.timers.size, 1, "only the run notice's own check is left");
+  assert.ok(!editTimers.some((id) => env.timers.has(id)));
+});
+
+test("the run notice stays while the run is queued or running", async () => {
+  const env = setup();
+  await env.bridge.handle("run", { fingerprint: env.fp() });
+  const notice = env.notices.at(-1);
+  env.host.runState = () => ({ state: "queued" });
+  env.tick();
+  env.host.runState = () => ({ state: "running", node: "2" });
+  env.tick();
+  env.bridge.check();
+  assert.equal(notice.cleared, false);
+  assert.equal(env.shown(), notice);
+});
+
+test("the run notice goes when the run state goes idle", async () => {
+  const env = setup();
+  await env.bridge.handle("run", { fingerprint: env.fp() });
+  const notice = env.notices.at(-1);
+  env.bridge.check(); // running
+  env.host.runState = () => ({ state: "idle" });
+  env.bridge.check(); // as on graphChanged
+  assert.equal(notice.cleared, true);
   assert.equal(env.timers.size, 0);
+});
+
+test("an idle state right after queuing does not clear the notice before the first timer check", async () => {
+  const env = setup();
+  env.host.runState = () => ({ state: "idle" }); // the queue has not caught up yet
+  await env.bridge.handle("run", { fingerprint: env.fp() });
+  const notice = env.notices.at(-1);
+  env.bridge.check();
+  assert.equal(notice.cleared, false);
+  env.tick(); // a second later, still idle: the run is over
+  assert.equal(notice.cleared, true);
+  assert.equal(env.timers.size, 0);
+});
+
+test("Cancel on a run that has finished cancels nothing and says nothing", async () => {
+  const env = setup();
+  await env.bridge.handle("run", { fingerprint: env.fp() });
+  const notice = env.notices.at(-1);
+  env.bridge.check(); // seen running
+  env.host.runState = () => ({ state: "idle" });
+  await env.press(notice);
+  assert.deepEqual(env.state.cancels, []);
+  assert.equal(env.notices.length, 1, "no 'could not be cancelled' notice");
+});
+
+test("a Cancel that fails because the run just finished says nothing", async () => {
+  const env = setup();
+  await env.bridge.handle("run", { fingerprint: env.fp() });
+  env.host.cancel = async () => {
+    env.host.runState = () => ({ state: "idle" });
+    throw new Error("not in the queue");
+  };
+  await env.press(env.notices.at(-1));
+  assert.equal(env.notices.length, 1);
 });
 
 // ------------------------------------------------------------ the reply
