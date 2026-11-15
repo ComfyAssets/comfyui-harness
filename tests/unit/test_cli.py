@@ -15,6 +15,7 @@ from harness.cli import (
     find,
     comfy_url,
     find_mcp_server,
+    find_playwriter,
     status,
     McpEntries,
     write_mcp_file,
@@ -323,11 +324,54 @@ def test_env_does_not_mutate_its_input():
 
 def test_status_reports_cli_and_mcp(tmp_path):
     make_exe(tmp_path / "pathbin" / "claude")
-    assert status(**lookup(tmp_path)) == {"cli_found": True, "mcp_found": False}
+    assert status(**lookup(tmp_path)) == {
+        "cli_found": True,
+        "mcp_found": False,
+        "playwriter_found": False,
+    }
     make_exe(tmp_path / "venv" / "bin" / "comfy-mcp")
-    assert status(**lookup(tmp_path)) == {"cli_found": True, "mcp_found": True}
+    assert status(**lookup(tmp_path)) == {
+        "cli_found": True,
+        "mcp_found": True,
+        "playwriter_found": False,
+    }
     neither = status(str(tmp_path / "none"), tmp_path, python="/nowhere/python")
-    assert neither == {"cli_found": False, "mcp_found": False}
+    assert neither == {"cli_found": False, "mcp_found": False, "playwriter_found": False}
+
+
+def test_find_playwriter_on_path(tmp_path):
+    exe = make_exe(tmp_path / "pathbin" / "playwriter")
+    assert find_playwriter(str(tmp_path / "pathbin")) == exe
+
+
+def test_find_playwriter_needs_it_on_path(tmp_path, monkeypatch):
+    # The agent runs `playwriter` by name with ComfyUI's PATH, so a copy only in
+    # ~/.local/bin (npm's global bin when its prefix is ~/.local) is not usable.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    make_exe(tmp_path / "home" / ".local" / "bin" / "playwriter")
+    assert find_playwriter(str(tmp_path / "none")) is None
+    assert status(str(tmp_path / "none"), tmp_path / "home")["playwriter_found"] is False
+
+
+def test_find_playwriter_skips_what_cannot_run(tmp_path):
+    (tmp_path / "pathbin" / "playwriter").mkdir(parents=True)  # a directory
+    dangling = tmp_path / "links" / "playwriter"
+    dangling.parent.mkdir(parents=True)
+    dangling.symlink_to(tmp_path / "gone")  # an npm link left by an uninstall
+    make_exe(tmp_path / "other" / "playwriter", mode=0o644)  # no exec bit
+    path = os.pathsep.join(str(tmp_path / d) for d in ("pathbin", "links", "other"))
+    assert find_playwriter(path) is None
+
+
+def test_find_playwriter_does_not_look_beside_the_server_python(tmp_path):
+    # Playwriter is an npm tool; a venv's bin is not where it lives.
+    make_exe(tmp_path / "venv" / "bin" / "playwriter")
+    assert status(**lookup(tmp_path))["playwriter_found"] is False
+
+
+def test_status_reports_playwriter(tmp_path):
+    make_exe(tmp_path / "pathbin" / "playwriter")
+    assert status(**lookup(tmp_path))["playwriter_found"] is True
 
 
 def test_failed_replace_removes_the_temp_file_and_raises(tmp_path, monkeypatch):

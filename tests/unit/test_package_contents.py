@@ -40,6 +40,7 @@ KEPT = (
     "README.md",
     "SECURITY.md",
     "docs/brand/banner.webp",
+    "docs/playwriter.md",  # the guide Settings and README point to
     "harness/routes.py",
     "web/harness.js",
 )

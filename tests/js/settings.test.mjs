@@ -140,6 +140,26 @@ test("comfy-mcp missing shows the install hint", () => {
   assert.ok(byText(el, "Claude Code not found"));
 });
 
+test("Playwriter found shows a found row and no hint", () => {
+  const el = renderServerRows({ document: fakeDocument(), io: fakeIo(), status: { ...PAIRED, playwriter_found: true }, browsers: [], onPair: () => {} });
+  const row = byText(el, "Playwriter found").parent;
+  assert.match(row.textContent, /^✓/);
+  assert.equal(byText(el, "npm i -g playwriter", "CODE"), undefined);
+  assert.equal(byText(el, "See docs/playwriter.md"), undefined);
+});
+
+test("Playwriter missing is optional: hint and guide, no error mark", () => {
+  // PAIRED has no playwriter_found: a server from before this field reads as not found.
+  for (const status of [{ ...PAIRED, playwriter_found: false }, PAIRED]) {
+    const el = renderServerRows({ document: fakeDocument(), io: fakeIo(), status, browsers: [], onPair: () => {} });
+    const row = byText(el, "Playwriter not found (optional)").parent;
+    assert.ok(byText(el, "npm i -g playwriter", "CODE"));
+    assert.ok(byText(el, "See docs/playwriter.md"));
+    assert.equal(row.textContent.includes("✗"), false);
+    assert.equal(row.textContent.includes("✓"), false);
+  }
+});
+
 test("revoke calls revokeBrowser with that row's id", async () => {
   const io = fakeIo();
   const el = renderServerRows({ document: fakeDocument(), io, status: PAIRED, browsers: BROWSERS, onPair: () => {} });
