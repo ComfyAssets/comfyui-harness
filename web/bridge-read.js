@@ -18,7 +18,7 @@ export const LIMITS = {
 
 const SEARCH_LIMIT = 30;
 const CUT_MARK = "…";
-const TITLE_HEIGHT = 30; // LiteGraph.NODE_TITLE_HEIGHT, used only when boundingRect is absent
+const TITLE_HEIGHT = 30; // LiteGraph.NODE_TITLE_HEIGHT
 
 // ---------------------------------------------------------------- ids
 
@@ -184,11 +184,19 @@ export function fingerprint(graph, identity) {
 
 // ------------------------------------------------------------ groups
 
+// A group's rectangle. Groups keep boundingRect current when they move.
 export function rectOf(item) {
   const r = item.boundingRect;
   if (r && r.length >= 4) return [r[0], r[1], r[2], r[3]];
-  const [x, y] = item.pos ?? [0, 0];
-  const [w, h] = item.size ?? [0, 0];
+  return nodeRect(item);
+}
+
+// A node's rectangle, title bar included, from its pos and size. Never from
+// node.boundingRect: in frontend 1.59.1 that is filled when the canvas draws,
+// so it is all zeros for a node just added and the old place for one just moved.
+export function nodeRect(node) {
+  const [x, y] = node.pos ?? [0, 0];
+  const [w, h] = node.size ?? [0, 0];
   return [x, y - TITLE_HEIGHT, w, h + TITLE_HEIGHT];
 }
 
@@ -201,7 +209,7 @@ export function rectOf(item) {
 export function groupMembers(graph) {
   const groups = Array.isArray(graph?.groups) ? graph.groups : [];
   const ordered = sortedNodes(graph).map((n) => {
-    const [x, y, w, h] = rectOf(n);
+    const [x, y, w, h] = nodeRect(n);
     return { id: String(n.id), cx: x + w / 2, cy: y + h / 2 };
   });
   return groups.map((group) => {

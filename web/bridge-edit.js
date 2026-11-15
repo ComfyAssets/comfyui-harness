@@ -19,7 +19,7 @@
 //     although it changed the graph, or when undo rejected
 // Titles, modes and positions are plain node properties and are set directly.
 
-import { findNode, fingerprint, isMissing, lookupType, rectOf } from "./bridge-read.js";
+import { findNode, fingerprint, isMissing, lookupType, nodeRect } from "./bridge-read.js";
 
 export class BridgeError extends Error {
   constructor(code, message) {
@@ -394,7 +394,7 @@ function overlaps(a, b) {
 }
 
 function stepDown(graph, x, y, [w, h], ignore) {
-  const others = (Array.isArray(graph?.nodes) ? graph.nodes : []).filter((n) => !ignore?.has(n)).map(rectOf);
+  const others = (Array.isArray(graph?.nodes) ? graph.nodes : []).filter((n) => !ignore?.has(n)).map(nodeRect);
   let top = y;
   for (let tries = 0; tries <= others.length; tries++) {
     const spot = [x - MARGIN, top - TITLE_HEIGHT - MARGIN, w + 2 * MARGIN, h + TITLE_HEIGHT + 2 * MARGIN];
@@ -411,7 +411,7 @@ function stepDown(graph, x, y, [w, h], ignore) {
 export function placeNear(graph, anchor, size, { center = [0, 0], ignore } = {}) {
   const [w, h] = size;
   if (anchor) {
-    const [ax, ay, aw] = rectOf(anchor);
+    const [ax, ay, aw] = nodeRect(anchor);
     const y = Array.isArray(anchor.pos) ? anchor.pos[1] : ay + TITLE_HEIGHT;
     return stepDown(graph, ax + aw + GAP, y, size, ignore);
   }
@@ -445,7 +445,7 @@ function rightMost(graph, ids, targets) {
     const id = t.ref !== undefined ? ids.get(t.ref) : t.id;
     const node = id === undefined ? null : findNode(graph, id);
     if (!node) continue;
-    const [x, , w] = rectOf(node);
+    const [x, , w] = nodeRect(node);
     if (x + w > bestEdge) {
       best = node;
       bestEdge = x + w;
@@ -498,7 +498,10 @@ const APPLY = {
     ctx.counts.changed++;
   },
   move_node(ctx, step) {
-    liveNode(ctx.graph, ctx.ids, step.node).pos = [step.pos[0], step.pos[1]];
+    const node = liveNode(ctx.graph, ctx.ids, step.node);
+    node.pos = [step.pos[0], step.pos[1]];
+    // A node added earlier in this batch now has its place: placeNew skips it.
+    ctx.unplaced = ctx.unplaced.filter((u) => u.node !== node);
     ctx.counts.changed++;
   },
 };

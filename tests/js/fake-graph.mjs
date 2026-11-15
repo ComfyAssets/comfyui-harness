@@ -22,6 +22,7 @@ function makeNode(spec) {
     isSubgraphNode: () => spec.subgraph === true,
   };
   Object.defineProperty(node, "boundingRect", {
+    configurable: true, // tests replace it with a stale one, as the real canvas has before it draws
     get() {
       return [node.pos[0], node.pos[1] - TITLE_HEIGHT, node.size[0], node.size[1] + TITLE_HEIGHT];
     },

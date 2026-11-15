@@ -293,6 +293,16 @@ test("a 2000-node graph with dense links outlines in good time", () => {
   assert.ok(Date.now() - start < 5000);
 });
 
+test("group membership goes by a node's pos and size, not its draw-time boundingRect", () => {
+  const g = threeNodes({ groups: [{ title: "Left", pos: [-10, -50], size: [200, 400] }] });
+  // Frontend 1.59.1 fills a node's boundingRect when the canvas draws; a node
+  // just moved still has its old one. Groups keep theirs current.
+  const node = g.getNodeById("2");
+  Object.defineProperty(node, "boundingRect", { get: () => [0, 0, 100, 50] });
+  node.pos = [5000, 5000];
+  assert.deepEqual(groupMembers(g), [{ title: "Left", ids: ["1"] }]);
+});
+
 test("group membership follows geometry after a node is moved out of a group", () => {
   const g = threeNodes({ groups: [{ title: "Left", pos: [-10, -50], size: [200, 400] }] });
   assert.deepEqual(groupMembers(g), [{ title: "Left", ids: ["1", "2"] }]);

@@ -208,6 +208,16 @@ test("set_title, move_node, disconnect and set_mode mute are applied", async () 
   assert.equal(findNode(graph, 20).mode, 0);
 });
 
+test("move_node on a node added earlier in the batch keeps that position", async () => {
+  const graph = canvas();
+  const host = fakeHost({ graph, types: TYPES });
+  const out = await applyOps(host, [
+    { op: "add_node", ref: "n", type: "Note", near: 1 },
+    { op: "move_node", node: "n", pos: [100, 120] },
+  ]);
+  assert.deepEqual(Array.from(findNode(graph, out.ids.n).pos), [100, 120]);
+});
+
 test("one beforeChange and one afterChange wrap the whole batch", async () => {
   const graph = canvas();
   const host = fakeHost({ graph, types: TYPES });
@@ -634,6 +644,25 @@ test("a new node without pos goes right of its anchor and steps down past an occ
 test("placeNear puts a node right of the anchor when the spot is free", () => {
   const graph = fakeGraph({ nodes: [{ id: 1, pos: [100, 50], size: [200, 100] }] });
   assert.deepEqual(placeNear(graph, findNode(graph, 1), [150, 80]), [340, 50]);
+});
+
+// In frontend 1.59.1 a node's boundingRect is a cache filled when the canvas
+// draws: all zeros for a node not drawn yet, the old place for one just moved.
+function undrawn(graph) {
+  for (const node of graph.nodes) Object.defineProperty(node, "boundingRect", { get: () => [0, 0, 0, 0] });
+  return graph;
+}
+
+test("placeNear goes by pos and size, not by a node's undrawn boundingRect", () => {
+  const graph = undrawn(fakeGraph({
+    nodes: [
+      { id: 1, pos: [100, 50], size: [200, 100] },
+      { id: 2, pos: [340, 50], size: [200, 100] },
+    ],
+  }));
+  const [x, y] = placeNear(graph, findNode(graph, 1), [150, 80]);
+  assert.equal(x, 340);
+  assert.ok(y - 30 >= 150, `below #2, got ${y}`);
 });
 
 test("placeNear steps down past every node in the way", () => {
