@@ -7,7 +7,7 @@ the owning task with a new failing test first. Record results in the commit body
 - [ ] 2. Claude Code starts in ComfyUI's base directory.
 - [ ] 3. Type `/mcp` at an empty prompt: `comfy-mcp` is listed as connected with its tools.
 - [ ] 4. Ask it to list available checkpoints: it uses a `comfy-mcp` tool.
-- [ ] 5. Press Ctrl+Z: the terminal keeps working.
+- [ ] 5. Press Ctrl+Z: nothing happens and the terminal keeps working (Claude Code does not print that it was suspended). Scroll the wheel over a long conversation: Claude Code scrolls its history; the prompt text does not change.
 - [ ] 6. Paste a multi-line prompt; select text with the mouse and copy it.
 - [ ] 7. Close the tab, reopen, press the key: the same session is there.
 - [ ] 8. Restart ComfyUI: the panel says the session ended and "start again and continue" resumes the conversation.

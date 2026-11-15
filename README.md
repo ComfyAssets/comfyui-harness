@@ -68,6 +68,8 @@ Open ComfyUI from the same address you paired from. A browser paired at `https:/
 
 The keys match the physical key. To type a backtick inside the terminal, press the key; with focus in the terminal it is sent to the agent. Holding the key does not repeat. The header has a close button. Closing the panel leaves the session running.
 
+The mouse wheel scrolls the agent's conversation. Ctrl+Z is not sent to the agent, because Claude Code would suspend itself with no shell to bring it back; use Ctrl+_ to undo typing.
+
 Rebind either key in Settings, Harness, Keys. The value is a `KeyboardEvent.code` with optional `Ctrl+`, `Alt+`, `Shift+`, `Meta+` prefixes, for example `F2` or `Alt+KeyT`.
 
 ## Settings

@@ -302,6 +302,20 @@ when it redraws **(spike)**.
 While the terminal has focus, key, paste, copy, wheel and pointer events are
 stopped at the panel so ComfyUI's handlers do not act on them **(spike)**.
 
+The wheel scrolls the terminal's history on the normal screen. On the
+alternate screen, when the program has turned on mouse tracking (Claude Code
+does, mode 1000 with 1006), the page sends wheel reports instead: button 64
+(up) or 65 (down) at the pointer's cell, in SGR form when mode 1006 is on and
+the legacy byte form otherwise, one report per row of movement and at most one
+screen per event. The vendored terminal would send Up/Down arrow keys there,
+which Claude Code reads as prompt history. Without mouse tracking the
+terminal's own behaviour is kept.
+
+The page does not send Ctrl+Z (a lone `0x1a`) to the program. Claude Code
+suspends itself on it, and with no shell above it the input stays broken after
+the host's `SIGCONT` (section 10). Claude Code undoes input with Ctrl+_.
+Ctrl+Z on the canvas is not affected.
+
 ### Keys
 
 Matched on the physical backtick/tilde key. Both are rebindable in our
@@ -430,7 +444,9 @@ write(data) / resize(cols, rows) / kill()
 - Exit is detected by waiting on the process, not by end-of-file.
 - A stopped agent is resumed. Ctrl+Z suspends Claude Code and there is no
   shell to resume it from **(spike)**, so the host watches for the stopped
-  state and sends `SIGCONT` to the group.
+  state and sends `SIGCONT` to the group. Resuming alone left Claude Code's
+  input broken in use, so the page no longer sends Ctrl+Z (section 9); the
+  resume stays for a stop from any other source.
 - `kill()` signals the process group: SIGHUP, SIGTERM after 2 s, SIGKILL
   after 5 s.
 - Environment: the server's, plus `TERM=xterm-256color`,
@@ -607,6 +623,7 @@ user's CLI configuration.
 | Working directory is ComfyUI's base directory | Claude |
 | No output replay on reattach | Claude |
 | Suspended agent is resumed automatically | Claude |
+| Page does not send Ctrl+Z; wheel reports for a mouse-tracking full-screen program | Claude, after Vito's use; full-screen kept by Vito |
 | Idle and detached limits; pairing numbers | Claude |
 | Claude Code and Chromium only in release 1 | Claude, from Vito's scope |
 | All gates blocking | Claude |

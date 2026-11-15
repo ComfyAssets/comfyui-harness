@@ -8,11 +8,13 @@ import { getStatus, listBrowsers, openSocket, revokeBrowser, setEnabled } from "
 import { createBridgeDialog, createPairingDialog } from "./dialogs.js";
 import { createPanel, viewFor } from "./panel.js";
 import { IDS, readSettings, registerSettings, renderServerRows } from "./settings.js";
+import { createWheel, isSuspendKey, reportBytes } from "./wheel.js";
 
 const CLI = "claude";
 const THEME = Object.freeze({ background: "#101018", foreground: "#d0d4e0" });
 const VENDOR = "./vendor/ghostty-web/ghostty-web.mjs";
 const RUNNING_OR_NEW = new Set([undefined, "running"]);
+const SGR_MOUSE = 1006;
 
 // The theme background is always opaque: a transparent one leaves stale text on redraw.
 export function terminalOptions(fontSize) {
@@ -300,7 +302,12 @@ export function createHarness({
       term.open(panel.terminalHost);
       fit.fit();
       fit.observeResize();
-      term.onData((data) => socket?.sendBytes(encoder.encode(data)));
+      // Ctrl+Z would suspend the program with no shell to resume it; Claude Code undoes with Ctrl+_.
+      term.onData((data) => {
+        if (!isSuspendKey(data)) socket?.sendBytes(encoder.encode(data));
+      });
+      const wheel = createWheel();
+      term.attachCustomWheelEventHandler?.((event) => onWheel(term, wheel, event));
       term.onResize(({ cols, rows }) => send({ type: "resize", cols, rows }));
       terminal = { term, fit };
       // Browser tests read the screen through this; ComfyUI never sets the flag.
@@ -313,6 +320,18 @@ export function createHarness({
       loading = null;
       throw error;
     }
+  }
+
+  // A full-screen program that tracks the mouse gets wheel reports, not the arrow
+  // keys the terminal would send. True tells the terminal the event is handled.
+  function onWheel(term, wheel, event) {
+    if (term.buffer.active.type !== "alternate" || !term.hasMouseTracking()) return false;
+    const box = term.element?.querySelector("canvas")?.getBoundingClientRect();
+    if (!box) return true;
+    const grid = { left: box.left, top: box.top, width: box.width, height: box.height, cols: term.cols, rows: term.rows };
+    const reports = wheel.reports(event, grid, term.getMode(SGR_MOUSE, false));
+    if (reports) socket?.sendBytes(reportBytes(reports));
+    return true;
   }
 
   function onHello(message) {

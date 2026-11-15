@@ -86,6 +86,43 @@ test("backtick and tilde typed inside the terminal reach the CLI", async ({ page
   await expect(panelOf(page)).toBeVisible();
 });
 
+test("ctrl+z in the terminal never reaches the CLI; the next key does", async ({ page }) => {
+  await openPaired(page, dataDir());
+  await log.waitFor(/^READY /, mark);
+  await page.keyboard.press("Control+KeyZ");
+  await page.keyboard.press("KeyA");
+  await log.waitFor(/^KEY b'a'$/, mark);
+  expect(log.typed(mark)).toBe("a");
+});
+
+test("the wheel sends mouse reports, not arrow keys, to a full-screen program tracking the mouse", async ({ page }) => {
+  await openPaired(page, dataDir());
+  await log.waitFor(/^READY /, mark);
+  // What Claude Code asks for: the alternate screen, button tracking, SGR reports.
+  await page.evaluate(() => window.__harnessTerm.write("\x1b[?1049h\x1b[?1000h\x1b[?1006h"));
+  const box = await panelOf(page).locator("canvas").first().boundingBox();
+  await page.mouse.move(box.x + 5, box.y + 5);
+  await page.mouse.wheel(0, -100);
+  await expect.poll(() => log.typed(mark)).toContain("[<64;1;1M");
+  await page.mouse.wheel(0, 100);
+  await expect.poll(() => log.typed(mark)).toContain("[<65;1;1M");
+  expect(log.typed(mark)).not.toContain("[A");
+  expect(log.typed(mark)).not.toContain("[B");
+});
+
+test("the wheel scrolls back through history on the normal screen", async ({ page }) => {
+  await openPaired(page, dataDir());
+  await log.waitFor(/^READY /, mark);
+  await page.evaluate(() => {
+    for (let i = 1; i <= 200; i++) window.__harnessTerm.write(`line ${i}\r\n`);
+  });
+  const box = await panelOf(page).locator("canvas").first().boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel(0, -600);
+  await expect.poll(() => page.evaluate(() => window.__harnessTerm.getViewportY())).toBeGreaterThan(0);
+  expect(log.typed(mark)).toBe("");
+});
+
 test("ctrl+backtick toggles and the host's Logs listener never fires", async ({ page }) => {
   await openPaired(page, dataDir());
   await page.keyboard.press("Control+Backquote");
