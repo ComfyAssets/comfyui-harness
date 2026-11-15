@@ -4,6 +4,8 @@ A ComfyUI custom node that drops a terminal from the top of the ComfyUI page and
 
 It exists so you do not have to leave ComfyUI for a separate terminal every time you talk to your agent, including when ComfyUI runs on another machine. It runs the CLI, model and subscription you already have. It does not include an agent, an API key or a model of its own.
 
+With the canvas bridge turned on (off by default), the agent can also read and edit the workflow open in the page, and press Run when you ask it to; see [Canvas bridge](#canvas-bridge).
+
 Only browsers you pair with `pair.py` can reach the terminal. Read [SECURITY.md](SECURITY.md) before installing: the agent can do whatever your account can do.
 
 ## Requirements
@@ -82,8 +84,11 @@ Settings, category Harness.
 | Terminal enabled | off until the first pairing | server |
 | Paired browsers, with revoke | none | server |
 | Claude Code found, `comfy-mcp` found | read-only | server |
+| Canvas: Canvas bridge | off | server |
+| Canvas: Allow edits | on | server |
+| Canvas: Allow runs | off | server |
 
-A browser that is not paired sees the look rows and a "Pair this browser" button instead of the server rows. Turning the terminal off ends the session and keeps the pairings.
+A browser that is not paired sees the look rows and a "Pair this browser" button instead of the server rows. Turning the terminal off ends the session and keeps the pairings. The three Canvas switches are described under [Canvas bridge](#canvas-bridge); they are server state, so only a paired browser can change them, and they apply to every paired browser.
 
 ## What the popup says
 
@@ -94,6 +99,46 @@ Pairing shows this text, and you tick a box before a code is shown:
 - Text the agent reads can steer it, including into pairing someone else's browser.
 - Every paired browser gets the same terminal. Other custom nodes in this page can reach it.
 - Enter only a code shown on your own screen.
+
+## Canvas bridge
+
+The canvas bridge lets the agent in the terminal work on the workflow open in the page, while you watch. It can read the graph (an outline of every node, node details, your selection, the last errors, the files your nodes have shown as output), look up node types, change the workflow (add, remove, connect and disconnect nodes, set widget values, bypass or mute, rename, move) and, if you allow it, press Run. Typical requests: "this picture doesn't look right", "add an upscaler on the final image", "look at my other workflows and build the good parts in here".
+
+It reaches the agent as an MCP server named `canvas` with eight tools: `get_outline`, `get_nodes`, `get_selection`, `get_errors`, `get_outputs`, `get_node_types`, `edit` and `run`. Your own Claude Code permission settings decide whether each tool is asked about or allowed; the harness adds no flag.
+
+How the edits behave:
+
+- Each `edit` call is one undo step: one Ctrl+Z on the canvas takes the whole request back. The panel shows a notice with the agent's summary and an **Undo** button, which undoes that edit only while it is still the newest change.
+- An edit never lands on a canvas that changed since the agent read it; it is refused and the agent reads again.
+- An edit that fails part-way is put back, and the agent is told which step failed.
+- The agent works on the graph on screen: the whole workflow, or the subgraph you have opened.
+
+### Turning it on
+
+1. Open Settings, Harness. Under **Canvas**, turn on **Canvas bridge**.
+2. A dialog lists what the agent can then do. Press **Turn on**.
+3. Press **Start again** in the same place. The agent reads its MCP settings when it starts, so the bridge reaches a session started after it was turned on. Start again stops the session and starts it with "continue", so the conversation is kept.
+
+Turning **Canvas bridge** off takes effect at once: the session's bridge secret is cleared and the next call is refused.
+
+### The three switches
+
+| Switch | Default | When off |
+|---|---|---|
+| Canvas bridge | off | No `canvas` tools for new sessions; calls from the running session are refused. |
+| Allow edits | on | `edit` is refused before it reaches the page. Reading still works: this is the read-only profile. |
+| Allow runs | off | `run` is refused. Run is separate from edits and needs its own switch, because a run uses your GPU, writes output files and cannot be undone. |
+
+With **Allow runs** on, the agent is told to press Run only when you ask for it. That is an instruction the agent follows, not something the code can check; to make it a hard stop, keep the switch off or set your Claude Code permissions to ask before `run`. A run queues the open workflow once, exactly as the Run button does, shows "Claude queued a run" with a **Cancel** button, and is refused while a subgraph is open (close the subgraph, or press Run yourself). Afterwards the agent can call `get_outputs` to get the output files' paths on the ComfyUI machine and open them.
+
+The switches are settings the harness honours, not limits on the agent: it runs as your account and can read workflows and output files from disk with or without the bridge. Text inside a workflow (notes, titles, prompts) is read by the agent and can steer it; be careful with workflows from other people. See [SECURITY.md](SECURITY.md).
+
+### Limits
+
+- **TLS in ComfyUI itself.** When ComfyUI serves HTTPS with `--tls-keyfile`, the bridge is unavailable: the agent would reach ComfyUI at `https://127.0.0.1`, whose certificate it may reject. A TLS proxy in front of a plain-HTTP ComfyUI is fine.
+- **Loopback only.** The agent's bearer secret must never leave the machine, so the bridge entry is written only for a loopback URL. ComfyUI must listen on `127.0.0.1` (or `::1`) or on all interfaces (`0.0.0.0`, `::`). Listening on one LAN address or a host name makes the bridge unavailable.
+- **One page.** Calls go to the page that holds the session. With no page attached, the agent is told to ask you to open ComfyUI and the terminal.
+- When the bridge is unavailable, Settings says why instead of showing the switches (status `bridge_reason`: `tls`, `not_loopback` or `unsupported`).
 
 ## Sessions
 
@@ -113,6 +158,7 @@ One session per server. A page that attaches takes the session from the page tha
 | `unsafe_permissions` (500) | `user/__harness`, `key` or `state.json` is open to other accounts, owned by someone else or a symlink. | `chmod 700 user/__harness; chmod 600 user/__harness/key user/__harness/state.json`, and check the owner. |
 | `bad_state` (500) | `state.json` or `key` is unreadable or from a newer version. | Move `user/__harness/state.json` (and `key` if it is the problem) aside and restart. Pairings are lost; nothing else. |
 | `not_found` (404) | Revoking a browser that is already gone. | Reload the settings. |
+| `bridge_refused` (403) on `/harness/mcp` | A call to the canvas bridge that is not from the current session's agent: no or an old secret, a browser header, or the bridge switched off. | Turn the bridge on and press "Start again"; the agent's old secret does not come back. |
 | `bad_request` (400) | A malformed request. | Reload the page. |
 | "Claude Code not found" in the panel | Same as `cli_not_found`. | As above. |
 | "comfy-mcp not found" in settings | Not installed where the server can find it. | `pip install comfy-mcp` in the server's environment. |
@@ -142,7 +188,7 @@ Delete the `comfyui-harness` directory. To remove the machine key and all pairin
 | `make lint` | black, flake8, mypy, bandit | same |
 | `make js-test` | JavaScript unit tests | Node 22, `npm ci --prefix tools/testing` |
 | `make browser-test` | Playwright, Chromium, own fixture server and fake CLI | Playwright's Chromium |
-| `make comfyui-test` | Playwright against a real ComfyUI with a fake CLI (port 8774) | ComfyUI checkout |
-| `make exposure-test` | Starts a real ComfyUI (port 8775, loopback), checks that none of our files or secrets are reachable, normally and with `--enable-cors-header`; `HARNESS_EXPOSURE_WITH_AGENT=1` adds a run with `--enable-agent` | ComfyUI checkout |
+| `make comfyui-test` | Playwright against a real ComfyUI with a fake CLI (port 8774): the terminal smoke run, and the canvas bridge on the real canvas (edits and one Ctrl+Z, a Note, rollback with a full undo history and in a subgraph, a real CPU run and its output file) | ComfyUI checkout |
+| `make exposure-test` | Starts a real ComfyUI (port 8775, loopback), checks that none of our files or secrets are reachable, and that the canvas bridge endpoint refuses everything but the session's agent, normally and with `--enable-cors-header`; `HARNESS_EXPOSURE_WITH_AGENT=1` adds a run with `--enable-agent` | ComfyUI checkout |
 
-`comfyui-test` and `exposure-test` read the checkout from `COMFYUI_DIR` (default `~/comfy/ComfyUI`, with a `venv` inside). They are not in CI, because CI has no ComfyUI checkout. Neither starts the real `claude`: `comfyui-test` puts a fake CLI first on the server's `PATH`, and `exposure-test` never opens a terminal session. The checks that do use real Claude Code are in [docs/manual-checks.md](docs/manual-checks.md).
+`comfyui-test` and `exposure-test` read the checkout from `COMFYUI_DIR` (default `~/comfy/ComfyUI`, with a `venv` inside). They are not in CI, because CI has no ComfyUI checkout. They link this checkout into a scratch folder as `comfyui-harness-under-test` and load only that name, so a `comfyui-harness` already installed in that ComfyUI is not loaded beside it. Neither starts the real `claude`: both put a fake CLI first on the server's `PATH` and check that it wins the lookup. The checks that do use real Claude Code are in [docs/manual-checks.md](docs/manual-checks.md).

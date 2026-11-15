@@ -288,7 +288,7 @@ Read (each returns `fingerprint` and the workflow's name):
 | `get_outline` | `max_chars` (default 20000, max 60000) | The outline (below), `node_count`, `detail` (`full`, `no_values`, `no_titles`, `groups_only`) |
 | `get_nodes` | `ids` (1 to 50) | Ids that do not exist are listed under `missing` and the rest are still returned. For each node: type, title, mode, position, size, every widget with its current value (and for a combo, up to 50 of its options plus the total count), every input with its type and what it is linked from, every output with its type and what it is linked to |
 | `get_selection` | none | The same detail for the nodes the author has selected (first 50), plus the count |
-| `get_errors` | none | Nodes with validation errors and why, the last execution error (node, type, message, the traceback's last 20 lines), node types on the canvas that are not installed |
+| `get_errors` | none | Nodes with validation errors and why, the last execution error (node, type, message, the traceback's last 20 lines), `prompt`: the last error ComfyUI gave for a prompt as a whole rather than for a node (`{type, message}`, for example a workflow with no output node; `null` when there is none), node types on the canvas that are not installed |
 | `get_outputs` | `ids` (optional) | For each node that has shown output since the page loaded: the files, as absolute paths on the ComfyUI machine, so the agent can open an image with its own file tool. The server turns the page's `{filename, subfolder, type}` into a path under ComfyUI's output, temp or input directory and drops any entry that does not resolve inside one of them |
 | `get_node_types` | `types` (1 to 20) **or** `search` (text, returns up to 30 names with their category) | For each type: inputs (name, type, required, default, options summary), outputs (name, type). From the node types registered in the page, so frontend-only nodes are included |
 
@@ -327,10 +327,20 @@ and `summary` (one line, shown to the author). Ops:
 `node`, `from`, `to` and `near` take an id as printed by the read tools, or a
 `ref` from an earlier `add_node` in the same batch.
 
-Result: `applied` (true or false), the new `fingerprint`, `ids` (ref to new
-node id), and for every `set_widget` the value the widget holds after the
-write. If it differs from what was asked, that op is listed under
-`changed_by_node` so the agent knows the write did not stick as sent.
+Result of an edit that applied: `applied: true`, the new `fingerprint`,
+`ids` (ref to new node id), and for every `set_widget` the value the widget
+holds after the write (`widgets`). If it differs from what was asked, that op
+is listed under `changed_by_node` so the agent knows the write did not stick
+as sent. An edit that did not apply is never a result with `applied: false`:
+it is a tool error (`isError: true`) whose message names the op and the
+reason, and says when the canvas may be partly changed (6.6 step 4).
+
+Results over the reply limit: an `edit` or `run` has already acted when its
+result is built, so its result is trimmed, never replaced by an error. An
+edit's result drops `widgets` first, then `changed_by_node` as well, with a
+`note` saying to read the nodes; a run's result drops the refused prompt's
+node errors, with a `note` pointing to `get_errors`. Read tools that are over
+the limit fail with "too much to send at once" and change nothing.
 
 Run:
 
@@ -380,7 +390,7 @@ All in the page, in `web/bridge.js`:
    `beforeChange` increments a counter and `afterChange` records one state
    when it returns to zero.
 4. **If an op throws while applying,** finish the change group and put the
-   canvas back as it was, then report `applied: false` with the op and the
+   canvas back as it was, then fail the tool call with the op and the
    error. Putting it back must never undo a step of the author's: the page
    undoes once only if this batch recorded a new undo state (a batch that
    threw before changing anything records none). "Recorded" is decided by
@@ -438,8 +448,11 @@ agent reads again.
 | `harness/session.py` | Makes and clears the secret with the session; exposes the attached sink |
 | `harness/cli.py` | Writes the `canvas` entry (6.3) |
 | `harness/store.py` | `bridge_enabled` (default false), `bridge_edits` (default true) and `bridge_runs` (default false) in `state.json` |
-| `web/bridge.js` | Pure functions over an injected graph and app: outline, node detail, fingerprint, validation, apply, placement. No import of ComfyUI's `app` |
-| `web/harness.js` | Routes bridge frames to `web/bridge.js` with the real `app`; shows the notice |
+| `web/bridge.js` | Answers each command through an injected host; the notice with Undo or Cancel; result shaping and trimming. No import of ComfyUI's `app` |
+| `web/bridge-read.js` | Pure: outline, node detail, fingerprint, group membership, node type lookup |
+| `web/bridge-edit.js` | Pure: validation, apply as one undo step, placement, rollback |
+| `web/harness.js` | `createComfyHost`, the one adapter over ComfyUI's `app`, its change tracker and internal stores; routes bridge frames to `web/bridge.js`; shows the notice |
+| `web/dialogs.js` | The consent dialog (section 9) |
 | `web/settings.js` | The bridge rows (section 9) |
 
 `harness/bridge.py` and `harness/mcp.py` must not import `session_host`,
@@ -613,14 +626,21 @@ approved continuing with them.
   undo does, so the undo history afterwards is as it was before the batch.
   A batch rolled back by undo is dropped from the redo queue, so Ctrl+Y
   cannot re-apply a failed edit.
-- `run` is refused while a subgraph is open ("Close the subgraph to run the
-  whole workflow, or press Run yourself."): the fingerprint covers only the
-  graph shown, and a run queues the whole workflow.
+- `run` is refused while a subgraph is open, with the message "Close the
+  subgraph to run the whole workflow, or press Run yourself." The reason: the
+  fingerprint covers only the graph on screen, while a run queues the whole
+  workflow, so inside a subgraph the agent has not read what would run. It
+  costs the author one click (close the subgraph, or press Run).
 - `run` reports the agent's own prompt even when the author presses Run at
   the same moment (both pass through ComfyUI's one queueing loop).
-- An `edit` or `run` result over the reply limit is cut down (widget detail,
-  then node errors left out, with a note) instead of becoming `too_large`,
-  because it has already acted.
+- An `edit` or `run` result over the reply limit is cut down instead of
+  becoming `too_large`, because it has already acted: an edit drops
+  `widgets`, then `changed_by_node` too; a run drops the refused prompt's
+  node errors; each with a note (6.5).
+- A failed `edit` is a tool error naming the op, not a result with
+  `applied: false` (6.5, 6.6).
+- `get_errors` also returns `prompt`, ComfyUI's last error for a prompt as a
+  whole (6.5).
 - The Undo notice is re-checked on the tracker's `graphChanged` event, on
   every bridge command and once a second while it is shown.
 - The graph shown is the canvas's graph (root, or the opened subgraph).
@@ -637,7 +657,30 @@ approved continuing with them.
   and may move on an upgrade. Every such use stays in one adapter in
   `web/harness.js`, and the real-ComfyUI test catches a move.
 - The real-ComfyUI tests must load only the branch's copy of the node; the
-  test copy gets its own folder name (plan Task 13).
+  test copy is linked as `comfyui-harness-under-test` and only that name is
+  whitelisted.
+
+Found when the tests first ran in a real ComfyUI (Task 13), and fixed:
+
+- ComfyUI's Settings dialog sets `pointer-events: none` on the page body,
+  marks every other body child `aria-hidden` and closes on a press outside
+  itself, so the consent dialog opened from Settings could not be clicked.
+  The pairing and consent dialogs now take the pointer, unhide themselves on
+  open and keep `pointerdown` and `focusin` from reaching the page.
+- A node's `boundingRect` is filled when the canvas draws: all zeros for a
+  node just added, the old place for one just moved. Placement and group
+  membership use the node's `pos` and `size`. A `move_node` on a node added
+  earlier in the same batch keeps its place.
+- When a failed batch's own undo rejects and the page restores its copy, the
+  batch's recorded step (equal to the copy) is dropped too, so the author's
+  next Ctrl+Z is not an empty step.
+- Verified in the real page: one Ctrl+Z removes a whole batch; a `Note` can
+  be added and its text set; widget writes go through `widget.setValue`;
+  `node.pos` assignment sticks; an author change fires `graphChanged` and
+  clears the Undo notice; rollback by undo and by restore with a full
+  50-entry history and inside an open subgraph (a subgraph can be built
+  without models); a tiny CPU run returns a prompt id and `get_outputs` then
+  gives a file that exists.
 
 ## 14. Decisions
 
