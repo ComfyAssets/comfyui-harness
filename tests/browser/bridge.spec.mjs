@@ -202,7 +202,7 @@ test("with runs off, run is refused; with runs on it queues and the notice offer
   expect(run.result.prompt_id).toMatch(/^prompt-\d+$/);
   expect(await page.evaluate(() => window.__stub.queued)).toEqual([run.result.prompt_id]);
 
-  await expect(panelOf(page)).toContainText("Claude queued a run");
+  await expect(panelOf(page)).toContainText("Claude Code queued a run");
   await panelOf(page).getByRole("button", { name: "Cancel" }).click();
   await expect.poll(() => page.evaluate(() => window.__stub.cancelled)).toEqual([run.result.prompt_id]);
 });

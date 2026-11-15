@@ -341,7 +341,9 @@ check_bridge() {
   if [[ -n "$logs" && "$logs" != *"$BRIDGE_SECRET"* ]]; then pass "logs hold no bridge secret"; else fail "logs hold the bridge secret (or none returned)"; fi
   if grep -qF "$BRIDGE_SECRET" "$SCRATCH/server.log"; then fail "server output holds the bridge secret"; else pass "server output holds no bridge secret"; fi
   # The fake CLI logs its argv (secrets masked) and env names; neither may hold the secret.
-  if grep -qF "$BRIDGE_SECRET" "$SCRATCH/fake_cli.log"; then fail "the agent's argv or env names hold the bridge secret"; else pass "the agent's argv and env names hold no bridge secret"; fi
+  if [[ ! -s "$SCRATCH/fake_cli.log" ]]; then fail "the fake CLI log is missing or empty"
+  elif grep -qF "$BRIDGE_SECRET" "$SCRATCH/fake_cli.log"; then fail "the agent's argv or env names hold the bridge secret"
+  else pass "the agent's argv and env names hold no bridge secret"; fi
 
   # A secret from an older session opens nothing.
   old="$BRIDGE_SECRET"

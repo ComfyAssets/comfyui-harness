@@ -272,6 +272,7 @@ export function createHarness({
   const bridge = createBridge({
     host: host ?? createComfyHost(comfy, win),
     notify: (text, button) => panel.notify(text, button),
+    agentName: () => status?.agent_name ?? "",
     setInterval: every,
     clearInterval: stopEvery,
   });

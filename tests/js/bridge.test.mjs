@@ -50,7 +50,7 @@ function canvas() {
   });
 }
 
-function setup({ graph = canvas(), identity = IDENTITY, outputs = [], run, rewrite } = {}) {
+function setup({ graph = canvas(), identity = IDENTITY, outputs = [], run, rewrite, agentName } = {}) {
   const host = fakeHost({ graph, types: TYPES, rewrite });
   const state = { identity, selected: [], runs: 0, cancels: [], run: run ?? (async () => ({ prompt_id: "p1", number: 3 })) };
   Object.assign(host, {
@@ -84,6 +84,7 @@ function setup({ graph = canvas(), identity = IDENTITY, outputs = [], run, rewri
   const bridge = createBridge({
     host,
     notify,
+    ...(agentName ? { agentName } : {}),
     setInterval: (fn) => {
       timers.set(nextTimer, fn);
       return nextTimer++;
@@ -482,8 +483,19 @@ test("run with an old fingerprint is refused; a fresh one queues once", async ()
   const result = await env.bridge.handle("run", { fingerprint: env.fp() });
   assert.deepEqual(result, { queued: true, prompt_id: "p1", number: 3 });
   assert.equal(env.state.runs, 1);
-  assert.equal(env.notices.at(-1).text, "Claude queued a run");
+  assert.equal(env.notices.at(-1).text, "The agent queued a run");
   assert.equal(env.notices.at(-1).button.label, "Cancel");
+});
+
+test("the run notice names the agent the session runs, as it is when the run is queued", async () => {
+  let name = "Codex CLI";
+  const env = setup({ agentName: () => name });
+  await env.bridge.handle("run", { fingerprint: env.fp() });
+  assert.equal(env.notices.at(-1).text, "Codex CLI queued a run");
+  name = "";
+  env.notices.at(-1).button.onClick = () => {};
+  await env.bridge.handle("run", { fingerprint: env.fp() });
+  assert.equal(env.notices.at(-1).text, "The agent queued a run");
 });
 
 test("a refused prompt returns its errors and queued false", async () => {

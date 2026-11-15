@@ -88,7 +88,10 @@ export function blocksStart(status) {
   return Boolean(status) && agentView(status) !== null;
 }
 
-function sessionView(session) {
+// The chosen agent's name; an older server does not send one.
+const agentNameOf = (status) => (typeof status?.agent_name === "string" && status.agent_name) || "The agent";
+
+function sessionView(session, status) {
   switch (session.state) {
     case "restarted":
       return { kind: "restarted", message: "ComfyUI restarted; the session ended", action: "continue" };
@@ -99,7 +102,7 @@ function sessionView(session) {
       return { kind: "ended", message: `The session ended while you were away: ${why}.`, action: "start" };
     }
     case "exited":
-      return { kind: "exited", message: `Claude exited with code ${session.code ?? "unknown"}`, action: "start" };
+      return { kind: "exited", message: `${agentNameOf(status)} exited with code ${session.code ?? "unknown"}`, action: "start" };
     default:
       return null;
   }
@@ -114,7 +117,7 @@ export function viewFor({ status, socket, session, here }) {
     return { kind: "wrong_origin", message };
   }
   if (!status.enabled) return { kind: "disabled", message: "The terminal is switched off", action: "enable" };
-  const fromSession = session ? sessionView(session) : null;
+  const fromSession = session ? sessionView(session, status) : null;
   if (fromSession) return fromSession;
   const fromAgent = agentView(status);
   if (fromAgent) return fromAgent;

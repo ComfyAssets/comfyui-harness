@@ -48,6 +48,13 @@ test("exited shows the exit code and start again", () => {
   assert.equal(view.action, "start");
 });
 
+test("exited names the chosen agent, or the agent when an older server does not say", () => {
+  const exited = { state: "exited", code: 3 };
+  const codex = viewFor({ status: { ...READY, agent_name: "Codex CLI" }, socket: "open", session: exited });
+  assert.equal(codex.message, "Codex CLI exited with code 3");
+  assert.equal(viewFor({ status: READY, socket: "open", session: exited }).message, "The agent exited with code 3");
+});
+
 test("taken over shows use here", () => {
   const view = viewFor({ status: READY, socket: "closed", session: { state: "detached", reason: "taken_over" } });
   assert.equal(view.kind, "elsewhere");

@@ -175,7 +175,7 @@ Turning **Canvas bridge** off takes effect at once: the session's bridge secret 
 | Allow edits | on | `edit` is refused before it reaches the page. Reading still works: this is the read-only profile. |
 | Allow runs | off | `run` is refused. Run has its own switch because a run uses your GPU, writes output files and cannot be undone. |
 
-With **Allow runs** on, the agent is told to press Run only when you ask for it. That is an instruction the agent follows, not something the code can check; to make it a hard stop, keep the switch off or set your agent's permissions to ask before `run`. A run queues the open workflow once, exactly as the Run button does, and shows "Claude queued a run" with a **Cancel** button until the run is over. It is refused while a subgraph is open (close the subgraph, or press Run yourself). Afterwards the agent can call `get_outputs` to get the output files' paths on the ComfyUI machine and open them.
+With **Allow runs** on, the agent is told to press Run only when you ask for it. That is an instruction the agent follows, not something the code can check; to make it a hard stop, keep the switch off or set your agent's permissions to ask before `run`. A run queues the open workflow once, exactly as the Run button does, and shows "<agent> queued a run" (for example "Codex CLI queued a run") with a **Cancel** button until the run is over. It is refused while a subgraph is open (close the subgraph, or press Run yourself). Afterwards the agent can call `get_outputs` to get the output files' paths on the ComfyUI machine and open them.
 
 The switches are settings the harness honours, not limits on the agent: it runs as your account and can read workflows and output files from disk with or without the bridge. Text inside a workflow (notes, titles, prompts) is read by the agent and can steer it, so be careful with workflows from other people. See [SECURITY.md](SECURITY.md).
 
@@ -224,7 +224,7 @@ Below the command it adds: "After the code is accepted, the command asks which a
 | "Open in another page" | Another page took the session. | **Use here** takes it back. |
 | "ComfyUI restarted; the session ended" | The server restarted. | **Start again and continue**. |
 | "The session ended while you were away" | Idle, time limit, revoked, switched off or stopped. | **Start again**. |
-| "Claude exited with code N" | The agent quit (the message says "Claude" for every agent). | **Start again**. |
+| "<agent> exited with code N" | The agent quit. | **Start again**. |
 
 ## Limitations
 

@@ -389,7 +389,7 @@ it is ready to test instead of running it yourself.
 - The read tools `get_errors` and `get_outputs` gain a `run` field
   (`idle`, `running` with the node now executing, or `queued`), so the agent
   can see when the run is done and then look at the result.
-- The panel's notice line says "Claude queued a run" with a **Cancel**
+- The panel's notice line says "<agent> queued a run" (the session's agent name from status, "The agent" when an older server sends none) with a **Cancel**
   button that removes that prompt from the queue, or interrupts it if it has
   started. The notice goes once the run is over: it is re-checked like the
   Undo notice, and "idle" counts as over once the run was seen queued or
