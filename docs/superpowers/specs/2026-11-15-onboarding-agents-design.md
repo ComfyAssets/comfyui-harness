@@ -17,8 +17,8 @@ proxy, sometimes running ComfyUI in Docker.
 
 ## Goals
 
-1. Support five agents: Claude Code, Codex CLI, opencode, GitHub Copilot
-   CLI, Gemini CLI. Each starts with the session's `comfy-mcp` and `canvas`
+1. Support four agents: Claude Code, Codex CLI, opencode, GitHub Copilot
+   CLI. Each starts with the session's `comfy-mcp` and `canvas`
    servers, per session, and resumes with "Start again".
 2. Choose the agent and the starting folder on the ComfyUI machine, in
    `pair.py`: asked after the first pairing, changed any time with
@@ -34,6 +34,7 @@ proxy, sometimes running ComfyUI in Docker.
 
 ## Non-goals
 
+- **Gemini CLI.** Its only per-session route, a system settings file named by GEMINI_CLI_SYSTEM_SETTINGS_PATH, is skipped unless the file and every folder above it are owned by root (verified with 0.66), and it has no MCP flag. Left out until it has a per-session way in (author's decision).
 - **pi.** It never asks before acting and has no per-session MCP setting.
   Left out until it has one (author's decision).
 - **Antigravity CLI (`agy`).** Its `--settings` takes per-session settings,
@@ -52,7 +53,7 @@ proxy, sometimes running ComfyUI in Docker.
   directory or the environment. The browser may still send nothing beyond
   what it sends today, and the server no longer uses its `cli` value at all.
 - Writing to any agent's global configuration (`~/.claude`, `~/.codex`,
-  `~/.config/opencode`, `~/.copilot`, `~/.gemini`).
+  `~/.config/opencode`, `~/.copilot`).
 - A bridge secret on a command line, where `ps` shows it to every user.
 - Telling an unpaired browser which agents or folders a machine has.
 
@@ -84,7 +85,7 @@ installed agents and a folder prompt) before this design.
 
 ### 1. The agent table (`harness/cli.py`)
 
-`CLIS` grows from one entry to five. Each `Cli` gains what differs per
+`CLIS` grows from one entry to four. Each `Cli` gains what differs per
 agent:
 
 | Field | Purpose |
@@ -104,13 +105,11 @@ against the installed version):
 | `codex` | `npm i -g @openai/codex` | `resume --last` (subcommand) |
 | `opencode` | `npm i -g opencode-ai` | `--continue` |
 | `copilot` | `npm i -g @github/copilot` | `--continue` |
-| `gemini` | `npm i -g @google/gemini-cli` | `--resume latest` |
 
 Forbidden, at least: Claude `--dangerously-skip-permissions` and
 `--permission-mode bypassPermissions` (today's list); Codex
 `--dangerously-bypass-approvals-and-sandbox`, `--full-auto`, and `-c`
-overrides of `approval_policy` or `sandbox_mode`; Gemini `--yolo`, `-y`,
-`--approval-mode yolo`; Copilot `--allow-all-tools`, `--allow-all`,
+overrides of `approval_policy` or `sandbox_mode`; Copilot `--allow-all-tools`, `--allow-all`,
 `--yolo`. The builder lists each agent's current flags from its `--help`.
 
 ### 2. Per-session MCP for each agent
@@ -126,15 +125,12 @@ through its global config, and the bearer secret never on argv:
 | `codex` | `-c mcp_servers.<name>.<key>=…` overrides per run; HTTP servers read the token from an env var (`bearer_token_env_var`) | an env var |
 | `opencode` | `OPENCODE_CONFIG_CONTENT` env: inline JSON added on top of the user's config | the env var |
 | `copilot` | `--additional-mcp-config @<data dir>/copilot-mcp.json` ("for this session") | the file |
-| `gemini` | `GEMINI_CLI_SYSTEM_SETTINGS_PATH=<data dir>/gemini-settings.json`; system settings override all others | the file |
 
 The exact key names inside each format (how a stdio server, an HTTP server
 and its header are written) are checked by the builder against each tool's
 docs and the installed version, and pinned by unit tests on the generated
-argv, env and files. Two notes to carry:
+argv, env and files. A note to carry:
 
-- Gemini's system settings file replaces any existing system settings for
-  that process; the harness file holds only `mcpServers`.
 - The environment the harness builds today stays as it is; the new
   variables are added only for the agent that needs them.
 
@@ -186,7 +182,7 @@ argv, env and files. Two notes to carry:
   in …. Change it with: python3 pair.py --setup".
 - With no terminal (`docker exec` without `-it`), it pairs, skips the
   questions and prints how to run `--setup`.
-- **No agent installed:** it lists the five agents with their install
+- **No agent installed:** it lists the four agents with their install
   commands and says to run `pair.py --setup` after installing. Pairing
   still succeeds.
 - `python3 pair.py --setup` asks the same questions any time, without a
@@ -234,7 +230,7 @@ Or choose another agent: python3 <path>/pair.py --setup         [Copy]
 
 - When no supported agent is installed at all, the first line reads "No
   supported agent is installed on the ComfyUI machine" and the install
-  line becomes the five commands.
+  line becomes the four commands.
 - When the folder is missing: "<folder> no longer exists. Choose another
   with: python3 <path>/pair.py --setup" [Copy] [Check again].
 - **Check again** fetches the status again (detection runs on every status
@@ -264,7 +260,7 @@ Below the command, a fixed sentence, the same for every machine (unpaired
 browsers learn nothing about it):
 
 > After the code is accepted, the command asks which agent to run (Claude
-> Code, Codex CLI, opencode, Copilot CLI or Gemini CLI) and which folder to
+> Code, Codex CLI, opencode or Copilot CLI) and which folder to
 > start in. The agent may ask you to sign in the first time.
 
 ### 9. Docs
