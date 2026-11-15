@@ -20,6 +20,7 @@ class El {
   set textContent(v) { this._text = String(v); this.children = []; }
   get textContent() { return this._text + this.children.map((c) => c.textContent).join(""); }
   setAttribute(k, v) { this.attributes[k] = String(v); }
+  removeAttribute(k) { delete this.attributes[k]; }
   appendChild(c) { c.parent = this; this.children.push(c); return c; }
   append(...cs) { for (const c of cs) this.appendChild(c); }
   replaceChildren(...cs) { this.children = []; this._text = ""; this.append(...cs); }
@@ -444,3 +445,35 @@ test("the bridge dialog takes focus on open and gives it back on close", () => {
   dialog.close();
   assert.equal(doc.activeElement, before);
 });
+
+// ComfyUI's own modal dialogs (Settings) set pointer-events: none on <body>,
+// mark every other child of <body> aria-hidden, and close on a pointerdown or
+// focus outside themselves. A dialog opened from Settings must still work.
+const BOTH_DIALOGS = [
+  ["pairing", () => setup().dialog],
+  ["bridge", () => createBridgeDialog({ document: fakeDocument })],
+];
+
+for (const [name, make] of BOTH_DIALOGS) {
+  test(`the ${name} dialog takes the pointer even when the page's modal turns it off on <body>`, () => {
+    const dialog = make();
+    assert.equal(dialog.element.style.pointerEvents, "auto");
+  });
+
+  test(`the ${name} dialog drops an aria-hidden set by the page's modal when it opens`, () => {
+    const dialog = make();
+    dialog.element.setAttribute("aria-hidden", "true");
+    dialog.open();
+    assert.equal(dialog.element.attributes["aria-hidden"], undefined);
+  });
+
+  test(`a press or focus in the ${name} dialog does not reach the page's modal as an outside click`, () => {
+    const dialog = make();
+    dialog.open();
+    for (const type of ["pointerdown", "focusin"]) {
+      let stopped = false;
+      dialog.element.dispatch(type, { stopPropagation: () => { stopped = true; } });
+      assert.equal(stopped, true, type);
+    }
+  });
+}

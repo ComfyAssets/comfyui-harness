@@ -23,11 +23,24 @@ const REJECTED_TEXT = "That code was not accepted. Request a new one.";
 const RETRYING_TEXT = "Connection lost, retrying";
 const Z_INDEX = "10001";
 
+// pointerEvents: ComfyUI's modal dialogs (Settings) set pointer-events: none
+// on <body> while open, and ours open on top of them.
 const BACKDROP = {
   position: "fixed", inset: "0", zIndex: Z_INDEX, display: "none",
   alignItems: "center", justifyContent: "center", padding: "16px",
-  background: "rgba(0, 0, 0, 0.5)", boxSizing: "border-box",
+  background: "rgba(0, 0, 0, 0.5)", boxSizing: "border-box", pointerEvents: "auto",
 };
+
+// A ComfyUI modal open underneath marks every other child of <body>
+// aria-hidden and closes when a press or focus lands outside it. Ours is
+// outside it, so it unhides itself on open and keeps those events from the
+// page; otherwise Settings would close under the dialog it opened.
+function overModal(element) {
+  for (const type of ["pointerdown", "focusin"]) {
+    element.addEventListener(type, (event) => event.stopPropagation());
+  }
+  return () => element.removeAttribute("aria-hidden");
+}
 const CARD = {
   position: "relative", display: "flex", flexDirection: "column", gap: "14px",
   width: "560px", maxWidth: "92vw", maxHeight: "90vh", overflowY: "auto", boxSizing: "border-box",
@@ -57,6 +70,7 @@ export function createPairingDialog({
   const button = (text, variant) => styleButton(make("button", text), variant);
 
   const element = styled("div", undefined, BACKDROP);
+  const unhide = overModal(element);
   element.setAttribute("role", "dialog");
   element.setAttribute("aria-modal", "true");
   element.setAttribute("aria-label", "Pair this browser");
@@ -246,6 +260,7 @@ export function createPairingDialog({
     element,
     open() {
       closeDialog();
+      unhide();
       element.style.display = "flex";
     },
     close: closeDialog,
@@ -263,6 +278,7 @@ export function createBridgeDialog({ document, onAccept = () => {} }) {
   const button = (text, variant) => styleButton(make("button", text), variant);
 
   const element = styled("div", undefined, BACKDROP);
+  const unhide = overModal(element);
   element.setAttribute("role", "dialog");
   element.setAttribute("aria-modal", "true");
   element.setAttribute("aria-label", "Turn on the canvas bridge");
@@ -309,6 +325,7 @@ export function createBridgeDialog({ document, onAccept = () => {} }) {
     element,
     open() {
       if (element.style.display !== "flex") returnFocus = document.activeElement ?? null;
+      unhide();
       element.style.display = "flex";
       accept.focus?.();
     },
