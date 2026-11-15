@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { viewFor, STOPPED_EVENTS, createPanel } from "../../web/panel.js";
+import { viewFor, STOPPED_EVENTS, createPanel, blocksStart } from "../../web/panel.js";
+import { runningAgent } from "../../web/agents.js";
 import { fakeDocument, fakeEvent, byText, buttons } from "./fake-dom.mjs";
 
 const READY = { supported: true, paired: true, enabled: true, cli_found: true, mcp_found: true, session: null };
@@ -357,4 +358,43 @@ test("the header names the agent and warns when it runs without asking", () => {
   assert.ok(byText(p.element, "⚠ Codex CLI runs without asking"));
   p.setAgent({ name: "Codex CLI", unprompted: false });
   assert.equal(byText(p.element, "⚠ Codex CLI runs without asking"), undefined);
+});
+
+// --- a running session is not hidden by a changed choice (spec §3: a change applies at the next start) ---
+
+const RUNNING = { cli: "codex", started: 1, fresh_after_change: false };
+
+for (const [label, change] of [
+  ["a missing agent", { agent_found: false, cli_found: false }],
+  ["a missing folder", { agent_folder_ok: false }],
+  ["an ignored choice", { agent_choice: "ignored", agent_choice_reason: "bad json" }],
+]) {
+  test(`${label} while a session runs still shows the terminal and does not block the start`, () => {
+    const status = { ...AGENT, ...change, session: RUNNING };
+    assert.equal(viewFor({ status, socket: "open", session: { state: "running" } }).kind, "terminal");
+    assert.equal(viewFor({ status, socket: "closed", session: null }).kind, "terminal");
+    assert.equal(blocksStart(status), false);
+    assert.equal(blocksStart({ ...status, session: null }), true);
+  });
+}
+
+test("the exit notice names the agent the session ran, not the one chosen since", () => {
+  const status = { ...AGENT, session: { ...RUNNING, cli: "claude" } };
+  const view = viewFor({ status, socket: "open", session: { state: "exited", code: 1 } });
+  assert.equal(view.message, "Claude Code exited with code 1");
+});
+
+test("runningAgent names the session's agent and badges it only when it is the chosen agent", () => {
+  const warn = { ...AGENT, agent_unprompted: true };
+  assert.deepEqual(runningAgent(warn), { name: "Codex CLI", unprompted: true });
+  assert.deepEqual(runningAgent({ ...warn, session: RUNNING }), { name: "Codex CLI", unprompted: true });
+  assert.deepEqual(runningAgent({ ...warn, session: { ...RUNNING, cli: "opencode" } }), { name: "opencode", unprompted: false });
+  assert.deepEqual(runningAgent({ ...warn, session: { ...RUNNING, cli: "nope" } }), { name: "", unprompted: false });
+});
+
+test("runningAgent gives nothing for an ignored choice with no session: its values are placeholders", () => {
+  const ignored = { ...AGENT, agent_unprompted: true, agent_choice: "ignored" };
+  assert.equal(runningAgent(ignored), null);
+  assert.equal(runningAgent(null), null);
+  assert.deepEqual(runningAgent({ ...ignored, session: { ...RUNNING, cli: "claude" } }), { name: "Claude Code", unprompted: false });
 });

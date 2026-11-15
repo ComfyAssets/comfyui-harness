@@ -7,6 +7,7 @@ import { decide, isEditable } from "./keys.js";
 import { getStatus, listBrowsers, openSocket, revokeBrowser, setEnabled } from "./client.js";
 import { createBridgeDialog, createPairingDialog } from "./dialogs.js";
 import { blocksStart, createPanel, viewFor } from "./panel.js";
+import { runningAgent } from "./agents.js";
 import { IDS, readSettings, registerSettings, renderServerRows } from "./settings.js";
 import { createWheel, isSuspendKey, reportBytes } from "./wheel.js";
 
@@ -272,7 +273,7 @@ export function createHarness({
   const bridge = createBridge({
     host: host ?? createComfyHost(comfy, win),
     notify: (text, button) => panel.notify(text, button),
-    agentName: () => status?.agent_name ?? "",
+    agentName: () => runningAgent(status)?.name ?? "",
     setInterval: every,
     clearInterval: stopEvery,
   });
@@ -296,17 +297,17 @@ export function createHarness({
       status = null;
       panel.showError(String(error?.message ?? error));
     }
-    if (status?.agent_name) panel.setAgent({ name: status.agent_name, unprompted: status.agent_unprompted });
+    if (status) panel.setAgent(runningAgent(status) ?? {});
     return status;
   }
 
-  // A resume across a change of agent or folder starts a new conversation; only
-  // the server knows whether that happened, so ask it once.
+  // Asks once which agent the new session runs, for the header and notices, and
+  // whether a resume across a change of agent or folder started a new conversation.
   async function afterStarted() {
-    if (!resumeAsked) return;
+    const resumed = resumeAsked;
     resumeAsked = false;
     await fetchStatus();
-    if (status?.session?.fresh_after_change === true) panel.notify(FRESH_AFTER_CHANGE);
+    if (resumed && status?.session?.fresh_after_change === true) panel.notify(FRESH_AFTER_CHANGE);
     render();
   }
 

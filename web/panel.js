@@ -2,7 +2,7 @@
 // Everything is built with createElement/textContent; server text may echo input.
 import { IDS, clamp } from "./settings.js";
 import { styleButton } from "./style.js";
-import { AGENTS, setupCommand } from "./agents.js";
+import { AGENTS, runningAgent, setupCommand } from "./agents.js";
 
 export const STOPPED_EVENTS = ["keydown", "keyup", "keypress", "paste", "copy", "cut", "wheel", "pointerdown", "mousedown", "contextmenu"];
 
@@ -83,13 +83,17 @@ function agentView(status) {
   return null;
 }
 
+// A session that exists keeps running whatever the machine's choice is now:
+// a change takes effect at the next session start.
+const hasSession = (status) => Boolean(status?.session) && typeof status.session === "object";
+
 // True when the status stops the terminal from starting until something changes on the machine.
 export function blocksStart(status) {
-  return Boolean(status) && agentView(status) !== null;
+  return Boolean(status) && !hasSession(status) && agentView(status) !== null;
 }
 
-// The chosen agent's name; an older server does not send one.
-const agentNameOf = (status) => (typeof status?.agent_name === "string" && status.agent_name) || "The agent";
+// The session's agent, else the chosen one; an older server sends neither.
+const agentNameOf = (status) => runningAgent(status)?.name || "The agent";
 
 function sessionView(session, status) {
   switch (session.state) {
@@ -119,7 +123,7 @@ export function viewFor({ status, socket, session, here }) {
   if (!status.enabled) return { kind: "disabled", message: "The terminal is switched off", action: "enable" };
   const fromSession = session ? sessionView(session, status) : null;
   if (fromSession) return fromSession;
-  const fromAgent = agentView(status);
+  const fromAgent = hasSession(status) ? null : agentView(status);
   if (fromAgent) return fromAgent;
   if (socket === "lost") return { kind: "reconnecting", message: "Reconnecting..." };
   return { kind: "terminal" };

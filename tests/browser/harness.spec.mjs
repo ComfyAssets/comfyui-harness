@@ -374,6 +374,24 @@ test.describe("each agent", () => {
     }
   });
 
+  test("a choice changed to a missing agent while a session runs still attaches to it", async ({ page }) => {
+    await openPaired(page, dataDir());
+    await log.waitFor(/^READY /, mark);
+    await page.getByRole("button", { name: "Close terminal" }).click();
+    await expect(panelOf(page)).toBeHidden();
+    renameSync(join(binDir(), "codex"), join(binDir(), "codex.off"));
+    writeAgentChoice(dataDir(), "codex", STATE);
+
+    await page.keyboard.press("Control+Backquote");
+    await expect(panelOf(page)).toBeVisible();
+    await expect(panelOf(page)).not.toContainText("is not installed");
+    await expect(panelOf(page).getByRole("button", { name: "Check again" })).toHaveCount(0);
+    await expect(panelOf(page).locator("span").first()).toHaveText("Claude Code");
+    await page.keyboard.press("KeyQ");
+    await log.waitFor(/^KEY b'q'$/, mark);
+    expect(log.since(mark).filter((l) => l.startsWith("READY")).length).toBe(1);
+  });
+
   for (const agent of AGENTS) {
     test(`${agent.id}: starts in the chosen folder with both servers, resumes, and recovers once installed`, async ({ page }) => {
       const folder = join(STATE, `folder-${agent.id}`);

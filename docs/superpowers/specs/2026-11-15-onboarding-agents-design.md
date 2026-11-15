@@ -167,6 +167,12 @@ argv, env and files. A note to carry:
   used; when either has changed, "Start again" starts a new conversation
   instead of resuming, and the panel says so (designer's call: resuming
   across agents cannot work).
+- While a session exists the panel attaches to it whatever the choice is
+  now: the missing-agent, missing-folder and ignored-choice views show only
+  when no session runs. The header, its badge and the panel's notices name
+  the session's own agent; the badge shows only when that agent is the
+  chosen one, and an ignored choice sets no title or badge from its
+  placeholder values.
 
 ### 4. `pair.py`
 

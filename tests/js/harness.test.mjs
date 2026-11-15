@@ -1021,3 +1021,47 @@ test("the header names the running agent and warns when it runs without asking",
   const env = await openReady({ status: { ...AGENT_READY, agent_unprompted: true } });
   assert.ok(byText(env.panel.element, "⚠ Codex CLI runs without asking"));
 });
+
+// --- a running session is not hidden by a changed choice ---
+
+const SESSION = { cli: "codex", started: 1, fresh_after_change: false };
+
+for (const [label, change] of [
+  ["a missing agent", { agent_found: false, cli_found: false, agents_installed: ["claude"] }],
+  ["a missing folder", { agent_folder_ok: false }],
+  ["an ignored choice", { agent_choice: "ignored", agent_choice_reason: "bad json" }],
+]) {
+  test(`${label} while a session runs attaches to it`, async () => {
+    const env = await openReady({ status: { ...AGENT_READY, ...change, session: SESSION } });
+    assert.equal(FakeSocket.all.length, 1);
+    env.socket().receive({ type: "hello", boot: "b1", session: SESSION });
+    assert.deepEqual(env.socket().json().at(-1), { type: "attach", cols: 80, rows: 24 });
+    assert.equal(byText(env.panel.element, "Check again", "BUTTON"), undefined);
+  });
+}
+
+test("the header names the running agent, without the chosen agent's badge", async () => {
+  const status = { ...AGENT_READY, agent_unprompted: true, session: { ...SESSION, cli: "claude" } };
+  const env = await openReady({ status });
+  assert.ok(byText(env.panel.element, "Claude Code"));
+  assert.equal(byText(env.panel.element, "⚠ Codex CLI runs without asking"), undefined);
+  assert.equal(byText(env.panel.element, "⚠ Claude Code runs without asking"), undefined);
+});
+
+test("an ignored choice sets no title or badge from its placeholder values", async () => {
+  const status = { ...AGENT_READY, agent_unprompted: true, agent_choice: "ignored", agent_choice_reason: "bad json" };
+  const env = await openReady({ status });
+  assert.equal(byText(env.panel.element, "Codex CLI"), undefined);
+  assert.equal(byText(env.panel.element, "⚠ Codex CLI runs without asking"), undefined);
+});
+
+test("a session started from this page is named by the status fetched after it started", async () => {
+  const env = await openReady({ status: AGENT_READY });
+  const ws = env.socket();
+  ws.receive({ type: "hello", boot: "b1", session: null });
+  env.state.status = { ...AGENT_READY, agent_name: "opencode", agent: "opencode", session: { ...SESSION, cli: "claude" } };
+  ws.receive({ type: "started" });
+  await flush();
+  ws.receive({ type: "exit", code: 0 });
+  assert.ok(byText(env.panel.element, "Claude Code exited with code 0"));
+});
