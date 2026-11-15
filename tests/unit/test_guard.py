@@ -261,3 +261,38 @@ def test_every_refusal_reads_the_same():
             require_session_agent(agent_req(headers), matches)
         bodies.add(refusal_response(e.value).body)
     assert len(bodies) == 1
+
+
+@pytest.mark.parametrize(
+    "headers,check",
+    [
+        ({**GOOD, "Origin": "http://x"}, "browser_header:Origin"),
+        ({**GOOD, "Cookie": "a=b"}, "browser_header:Cookie"),
+        ({**GOOD, "Sec-Fetch-Site": "none"}, "browser_header:Sec-Fetch-Site"),
+        ({}, "no_bearer"),
+        ({"Authorization": "Basic abc"}, "no_bearer"),
+        ({"Authorization": "Bearer "}, "bad_bearer"),
+        ({"Authorization": "Bearer  " + SECRET}, "bad_bearer"),
+        ({"Authorization": "Bearer nope"}, "secret_mismatch"),
+    ],
+)
+def test_a_refusal_names_the_failed_check_for_the_log_only(headers, check):
+    with pytest.raises(Refusal) as e:
+        require_session_agent(agent_req(headers), matches)
+    assert e.value.check == check
+    assert json.loads(refusal_response(e.value).body) == {
+        "error": {"code": "bridge_refused", "message": ""}
+    }
+
+
+def test_two_authorization_headers_are_a_bad_bearer():
+    from multidict import CIMultiDict
+
+    headers = CIMultiDict([("Authorization", "Bearer " + SECRET), ("Authorization", "Bearer x")])
+    with pytest.raises(Refusal) as e:
+        require_session_agent(agent_req(headers), matches)
+    assert e.value.check == "bad_bearer"
+
+
+def test_a_refusal_without_a_check_has_an_empty_one():
+    assert Refusal("not_paired", "x").check == ""

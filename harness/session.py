@@ -76,9 +76,13 @@ class SessionManager:
             return
         exe = self._find(cli_id)
         cli = cli_mod.CLIS[cli_id]
-        secret = self._bridge.open_session() if self._bridge is not None else None
+        url = self._comfy_url()
+        # A secret only when the canvas entry will be written with it (the same test
+        # write_mcp_file makes), so the bridge is never live without the entry.
+        bridge_works = self._bridge is not None and cli_mod.is_loopback_http(url)
+        secret = self._bridge.open_session() if bridge_works else None
         try:
-            self._spawn(sink, cli_id, cli, exe, cols, rows, resume, secret)
+            self._spawn(sink, cli_id, cli, exe, url, cols, rows, resume, secret)
         except BaseException:
             # No path may leave a live secret without a session.
             self._close_bridge_session()
@@ -91,15 +95,14 @@ class SessionManager:
         cli_id: str,
         cli: cli_mod.Cli,
         exe: Path,
+        url: str,
         cols: int,
         rows: int,
         resume: bool,
         secret: Optional[str],
     ) -> None:
         try:
-            wrote = cli_mod.write_mcp_file(
-                self._store.mcp_path, self._comfy_url(), canvas_secret=secret
-            )
+            wrote = cli_mod.write_mcp_file(self._store.mcp_path, url, canvas_secret=secret)
         except OSError as error:
             reason = error.strerror or type(error).__name__
             raise Refusal("spawn_failed", f"Could not write the MCP config: {reason}") from error

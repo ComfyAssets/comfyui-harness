@@ -806,6 +806,57 @@ async def test_nothing_about_an_mcp_request_reaches_the_log(client, running_sess
     assert "bridge_refused" in harness_logs.text
 
 
+def bridge_refusals(logs):
+    return [
+        r.getMessage()
+        for r in logs.records
+        if r.levelno == logging.INFO and "bridge_refused" in r.getMessage()
+    ]
+
+
+async def test_a_bridge_refusal_logs_the_failed_checks_name_at_info(
+    client, running_session, clock, harness_logs
+):
+    cases = [
+        ({**bearer(running_session), "Origin": "o-mark"}, "browser_header:Origin"),
+        ({**bearer(running_session), "Cookie": "c=cookie-mark"}, "browser_header:Cookie"),
+        (
+            {**bearer(running_session), "Sec-Fetch-Site": "sfs-mark"},
+            "browser_header:Sec-Fetch-Site",
+        ),
+        ({}, "no_bearer"),
+        ({"Authorization": "Bearer  bad-mark"}, "bad_bearer"),
+        (bearer("f" * 64), "secret_mismatch"),
+    ]
+    for headers, check in cases:
+        r = await client.post(MCP, json=INITIALIZE, headers=headers)
+        await assert_bridge_refused(r)
+        assert bridge_refusals(harness_logs)[-1] == "bridge_refused: " + check
+    text = harness_logs.text
+    for mark in ("o-mark", "cookie-mark", "sfs-mark", "bad-mark", "f" * 64, running_session):
+        assert mark not in text
+
+
+async def test_a_bridge_refusal_without_a_bridge_logs_no_bridge(client, harness_logs):
+    await assert_bridge_refused(await client.post(MCP, json=INITIALIZE, headers=bearer("ab" * 32)))
+    assert bridge_refusals(harness_logs) == ["bridge_refused: no_bridge"]
+
+
+async def test_bridge_refusals_log_once_per_check_per_minute(
+    client, running_session, clock, harness_logs
+):
+    for _ in range(3):
+        await client.post(MCP, json=INITIALIZE, headers=bearer("f" * 64))
+    await client.post(MCP, json=INITIALIZE)
+    assert bridge_refusals(harness_logs) == [
+        "bridge_refused: secret_mismatch",
+        "bridge_refused: no_bearer",
+    ]
+    clock.advance(61)
+    await client.post(MCP, json=INITIALIZE, headers=bearer("f" * 64))
+    assert len(bridge_refusals(harness_logs)) == 3
+
+
 async def test_install_builds_the_bridge_and_hands_it_to_the_session(monkeypatch, tmp_path):
     from harness.bridge import Bridge
     from harness.routes import install

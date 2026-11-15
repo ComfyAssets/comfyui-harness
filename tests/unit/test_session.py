@@ -576,6 +576,31 @@ def test_start_asks_the_bridge_for_a_secret_and_writes_it(bmgr, bridge, monkeypa
     assert seen == [(1, {"canvas_secret": "s" * 64})]
 
 
+@pytest.mark.parametrize(
+    "url", ["http://192.168.1.5:8188", "http://comfy.lan:8188", "https://127.0.0.1:8188"]
+)
+def test_no_secret_is_made_when_the_canvas_entry_cannot_be_written(
+    made, store, clock, bridge, monkeypatch, url
+):
+    seen = []
+    monkeypatch.setattr(cli_mod, "write_mcp_file", lambda p, u, **kw: seen.append(kw) or BOTH)
+    mgr = SessionManager(made, store, CWD, lambda: url, clock, bridge=bridge)
+    mgr.start(FakeSink(), "claude", 80, 24, False)
+    assert bridge.opened == 0
+    assert seen == [{"canvas_secret": None}]
+
+
+def test_a_real_bridge_is_not_live_after_a_start_on_a_lan_address(made, store, clock):
+    from harness.bridge import Bridge
+
+    switches = SimpleNamespace(state=SimpleNamespace(enabled=True, bridge_enabled=True))
+    real = Bridge(switches, lambda: None, lambda: {})
+    mgr = SessionManager(made, store, CWD, lambda: "http://192.168.1.5:8188", clock, bridge=real)
+    mgr.start(FakeSink(), "claude", 80, 24, False)
+    assert mgr.info() is not None
+    assert real.live is False
+
+
 def test_start_passes_mcp_config_when_only_the_canvas_entry_exists(bmgr, host, store, monkeypatch):
     monkeypatch.setattr(
         cli_mod, "write_mcp_file", lambda p, u, **kw: McpEntries(comfy=False, canvas=True)

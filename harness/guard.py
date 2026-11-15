@@ -33,13 +33,18 @@ Lookup = Callable[[str], Optional[Browser]]
 
 
 class Refusal(Exception):
-    """A request the harness declines; `code` keys STATUS."""
+    """A request the harness declines; `code` keys STATUS.
 
-    def __init__(self, code: str, message: str = "") -> None:
+    `check` names the failed check for the log only (header names, never values);
+    the response body never carries it.
+    """
+
+    def __init__(self, code: str, message: str = "", check: str = "") -> None:
         super().__init__(message or code)
         self.code = code
         self.status = STATUS[code]
         self.message = message
+        self.check = check
 
 
 def refusal_response(refusal: Refusal) -> web.Response:
@@ -114,17 +119,21 @@ def agent_credential(request: web.Request) -> str:
     """The bearer token of a caller that may be the session's agent.
 
     Checks everything except the secret itself. Every refusal is the same
-    `bridge_refused` with no message, so a caller never learns which check failed.
+    `bridge_refused` with no message, so a caller never learns which check failed;
+    only the log learns it, from `check`.
     """
     headers = request.headers
-    if any(name in headers for name in BROWSER_HEADERS):
-        raise Refusal("bridge_refused")
+    for name in BROWSER_HEADERS:
+        if name in headers:
+            raise Refusal("bridge_refused", check="browser_header:" + name)
     values = headers.getall("Authorization", [])
-    if len(values) != 1 or not values[0].startswith(BEARER):
-        raise Refusal("bridge_refused")
+    if len(values) > 1:
+        raise Refusal("bridge_refused", check="bad_bearer")
+    if not values or not values[0].startswith(BEARER):
+        raise Refusal("bridge_refused", check="no_bearer")
     token = values[0].removeprefix(BEARER)
     if not token or token != token.strip() or " " in token:
-        raise Refusal("bridge_refused")
+        raise Refusal("bridge_refused", check="bad_bearer")
     return token
 
 
@@ -136,4 +145,4 @@ def require_session_agent(request: web.Request, matches: Callable[[str], bool]) 
     except Exception:  # noqa: BLE001 - a broken matcher refuses, never admits
         ok = False
     if ok is not True:
-        raise Refusal("bridge_refused")
+        raise Refusal("bridge_refused", check="secret_mismatch")

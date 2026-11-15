@@ -41,6 +41,7 @@ UNKNOWN = (
     "The page did not answer. The outcome is unknown: "
     "read the canvas again before doing anything else."
 )
+ENDED = "The session ended before this call was sent."
 PAGE_FAILED = "The page could not do that."
 TYPES_OR_SEARCH = "Give either types or search, not both and not neither."
 
@@ -180,18 +181,22 @@ TOOLS: Tuple[Tool, ...] = (
     Tool(
         "get_errors",
         "Read what is wrong with the workflow: nodes with validation errors and why, the last "
-        "execution error (node, type, message, the traceback's last 20 lines), and node types "
-        "on the canvas that are not installed. Also returns run: idle, queued, or running with "
-        "the node now executing." + _READS,
+        "execution error (node, type, message, the traceback's last 20 lines), prompt (the "
+        "last error ComfyUI gave for a prompt as a whole rather than for a node, as type and "
+        "message, for example a workflow with no output node; null when there is none), and "
+        "node types on the canvas that are not installed. Also returns run: idle, queued, or "
+        "running with the node now executing." + _READS,
         _schema({}),
     ),
     Tool(
         "get_outputs",
         "List the files each node has shown as output since the page loaded, as absolute paths "
-        "on the ComfyUI machine, so you can open an image with your own file tool. Only files "
-        "inside ComfyUI's output, temp and input directories are given; entries that do not "
-        "resolve inside one are counted under skipped. Also returns run: idle, queued, or "
-        "running with the node now executing, so you can tell when a run is done." + _READS,
+        "on the ComfyUI machine, so you can open an image with your own file tool. Returns "
+        "outputs, a list of {node, paths} with node the node's id, and skipped, the number of "
+        "entries left out. Only files inside ComfyUI's output, temp and input directories are "
+        "given; entries that do not resolve inside one, and any past the first 500 files, are "
+        "counted under skipped. Also returns run: idle, queued, or running with the node now "
+        "executing, so you can tell when a run is done." + _READS,
         _schema({"ids": _ids("Only these nodes, 1 to 50. Omit for every node.")}),
     ),
     Tool(
@@ -397,6 +402,10 @@ class Bridge:
         elif ok is False:
             future.set_exception(_PageError(_page_error(message.get("error"))))
 
+    def waiting_on(self, sink: "Sink") -> bool:
+        """True while a call waits for a reply on `sink`."""
+        return any(waiting is sink for waiting, _ in self._waiting.values())
+
     def drop(self, sink: "Sink") -> None:
         """Fail every call waiting on `sink`. Synchronous and idempotent."""
         self._fail(lambda waiting_on: waiting_on is sink)
@@ -438,11 +447,16 @@ class Bridge:
             took = time.monotonic() - started
             log.info("bridge %s %s in %.2fs", name, outcome, took)
 
+    def _check_session(self, name: str, generation: int) -> None:
+        """Refuse a call whose session has gone. Nothing of it reached the page, so
+        the text says why (switched off, or the session ended), never "unknown"."""
+        self._check_switches(name)
+        if generation != self._generation:
+            raise ToolError(ENDED)
+
     async def _call(self, name: str, args: dict, token: Optional[int]) -> dict:
         generation = self._generation if token is None else token
-        if generation != self._generation:
-            raise ToolError(UNKNOWN)
-        self._check_switches(name)
+        self._check_session(name, generation)
         if self._pending >= QUEUE_LIMIT:
             raise ToolError(BUSY)
         if name == "get_node_types" and (("types" in args) == ("search" in args)):
@@ -450,9 +464,7 @@ class Bridge:
         self._pending += 1
         try:
             async with self._lock:
-                if generation != self._generation:
-                    raise ToolError(UNKNOWN)
-                self._check_switches(name)
+                self._check_session(name, generation)
                 result = await self._relay(name, args)
         finally:
             self._pending -= 1
@@ -490,6 +502,7 @@ _OUTCOMES = {
     BUSY: "busy",
     NO_PAGE: "no_page",
     UNKNOWN: "unknown",
+    ENDED: "ended",
     TYPES_OR_SEARCH: "invalid",
 }
 

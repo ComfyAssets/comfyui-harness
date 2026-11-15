@@ -69,19 +69,29 @@ class Deps:
 
 
 class _RefusalLog:
-    """Logs a refusal at DEBUG, at most once per code per interval."""
+    """Logs a refusal at most once per code (and check) per interval.
+
+    Most refusals log at DEBUG. A `bridge_refused` logs at INFO with the name of
+    the check that failed, so an owner can tell why the agent's canvas calls are
+    refused; the name is fixed text or a header name, never a value.
+    """
 
     def __init__(self, clock: Callable[[], float]) -> None:
         self._clock = clock
         self._last: dict[str, float] = {}
 
-    def note(self, code: str) -> None:
+    def note(self, refusal: Refusal) -> None:
+        bridge = refusal.code == "bridge_refused"
+        key = f"{refusal.code}:{refusal.check}" if bridge else refusal.code
         now = self._clock()
-        last = self._last.get(code)
+        last = self._last.get(key)
         if last is not None and now - last < REFUSAL_LOG_INTERVAL:
             return
-        self._last[code] = now
-        log.debug("refused a request: %s", code)
+        self._last[key] = now
+        if bridge:
+            log.info("bridge_refused: %s", refusal.check or "unknown")
+        else:
+            log.debug("refused a request: %s", refusal.code)
 
 
 def _store_refusal(error: StoreError) -> Refusal:
@@ -98,11 +108,11 @@ def _guarded(deps: Deps, refusals: _RefusalLog, fn: Handler) -> Handler:
                 raise Refusal("bad_state", "The harness data directory is not open.")
             return await fn(request)
         except Refusal as refusal:
-            refusals.note(refusal.code)
+            refusals.note(refusal)
             return refusal_response(refusal)
         except StoreError as error:
             converted = _store_refusal(error)
-            refusals.note(converted.code)
+            refusals.note(converted)
             return refusal_response(converted)
 
     return handler
@@ -195,7 +205,7 @@ def _mcp_response(reply: mcp.Reply) -> web.Response:
 async def _serve_mcp(request: web.Request, bridge: Optional[Bridge]) -> web.Response:
     """One MCP request from the session's agent (canvas bridge spec 6.1, 6.2)."""
     if bridge is None:
-        raise Refusal("bridge_refused")
+        raise Refusal("bridge_refused", check="no_bridge")
     # Early check, so a stranger's body is never read.
     require_session_agent(request, bridge.secret_matches)
     raw = await _read_capped(request, mcp.MAX_BODY + 1)
@@ -204,7 +214,7 @@ async def _serve_mcp(request: web.Request, bridge: Optional[Bridge]) -> web.Resp
     # call waits makes the bridge refuse the call.
     token = bridge.session_token(agent_credential(request))
     if token is None:
-        raise Refusal("bridge_refused")
+        raise Refusal("bridge_refused", check="secret_mismatch")
 
     async def call(name: str, args: dict) -> dict:
         return await bridge.call_tool(name, args, token)
@@ -389,11 +399,16 @@ def _session_manager(
     )
 
 
+def page_for_bridge(deps: Deps) -> Any:
+    """The socket holding the session, if it may get a bridge frame now; else None."""
+    return _terminal(deps).bridge_target()
+
+
 def _build_bridge(deps: Deps, store: Store, folder_paths: Any) -> Bridge:
     """The bridge sends to the page holding the session; output dirs are read per call."""
 
     def attached() -> Any:
-        return deps.sessions.sink if deps.sessions is not None else None
+        return page_for_bridge(deps)
 
     def output_dirs() -> dict[str, Path]:
         return {

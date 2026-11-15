@@ -216,7 +216,9 @@ async def _tools_call(params: Any, request_id: Any, tools: Sequence[Tool], call:
     if not isinstance(params, dict):
         return _error(200, INVALID_PARAMS, "params must be an object", request_id)
     name = params.get("name")
-    arguments = params.get("arguments", {})
+    arguments = params.get("arguments")
+    if arguments is None:
+        arguments = {}  # absent or null: a call with no arguments
     if not isinstance(name, str):
         return _error(200, INVALID_PARAMS, "name must be a string", request_id)
     if not isinstance(arguments, dict):

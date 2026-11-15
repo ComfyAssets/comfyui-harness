@@ -253,6 +253,24 @@ class Terminal:
             return WS_CLOSE["disabled"], "disabled"
         return None
 
+    def bridge_target(self) -> Optional[SocketSink]:
+        """The socket holding the session, if a bridge frame may go to it now.
+
+        None for a muted or closing socket, and for one whose browser fails
+        admission; a holder that is no longer paired is shut the usual way.
+        Synchronous: the check and the send happen with no await between them.
+        """
+        manager = self._manager
+        sink = manager.sink if manager is not None else None
+        if not isinstance(sink, SocketSink) or sink.muted or sink.closing:
+            return None
+        refused = self._admission(self._sockets.get(sink))
+        if refused is None:
+            return sink
+        if refused[0] == WS_CLOSE["not_paired"]:
+            self._shut(sink, *refused)
+        return None
+
     def _drop(self, sink: SocketSink) -> None:
         """Fail the bridge calls waiting on this socket. Synchronous, never awaits."""
         if self._deps.bridge is not None:
@@ -280,7 +298,9 @@ class Terminal:
         if msg.type is not WSMsgType.TEXT:
             return True
         try:
-            message = self._text(msg.data)
+            message = self._text(sink, msg.data)
+            if message is None:
+                return True  # a large frame no call waits for: dropped unparsed
             if message["type"] == "bridge_reply":
                 self._bridge_reply(sink, message)
             else:
@@ -292,14 +312,22 @@ class Terminal:
             _tell(sink, {"type": "error", "code": refusal.code, "message": refusal.message})
         return True
 
-    @staticmethod
-    def _text(data: str) -> dict:
-        """Parse a text frame under its type's size limit, measured in UTF-8 bytes."""
+    def _text(self, sink: SocketSink, data: str) -> Optional[dict]:
+        """Parse a text frame under its type's size limit, measured in UTF-8 bytes.
+
+        A frame over MAX_TEXT_FRAME can only be a `bridge_reply`, so it is parsed
+        only while the bridge waits for a reply on this socket; otherwise it is
+        dropped unparsed (None) and the socket stays open, so a bystander cannot
+        force large parses and a late reply does not end the terminal.
+        """
         size = len(data.encode("utf-8"))
         if size > MAX_REPLY:
             raise _TooBig()
         if size <= MAX_TEXT_FRAME:
             return _parse(data)
+        bridge = self._deps.bridge
+        if bridge is None or not bridge.waiting_on(sink):
+            return None
         try:
             message = _parse(data)
         except Refusal:

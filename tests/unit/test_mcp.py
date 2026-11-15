@@ -130,6 +130,16 @@ async def test_tools_call_arguments_default_to_empty_object() -> None:
     assert call.calls == []
 
 
+async def test_tools_call_null_arguments_are_an_empty_object() -> None:
+    call = Recorder()
+    reply = await run(rpc("tools/call", {"name": "echo", "arguments": None}, id=3), call)
+    assert reply.body is not None
+    assert "error" not in reply.body
+    assert reply.body["result"]["isError"] is True
+    assert "arguments.n" in reply.body["result"]["content"][0]["text"]
+    assert call.calls == []
+
+
 async def test_tool_error_text_is_returned() -> None:
     call = Recorder(exc=ToolError("nope"))
     reply = await run(rpc("tools/call", {"name": "echo", "arguments": {"n": 1}}, id=3), call)

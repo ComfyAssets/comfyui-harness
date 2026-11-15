@@ -10,10 +10,10 @@ import os
 import secrets
 import shutil
 import sys
-from urllib.parse import urlsplit
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Optional
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True)

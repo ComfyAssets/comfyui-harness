@@ -34,6 +34,7 @@ UNKNOWN = (
     "read the canvas again before doing anything else."
 )
 MALFORMED = "The page could not do that."
+ENDED = "The session ended before this call was sent."
 HEX = re.compile(r"^[0-9a-f]+$")
 
 
@@ -412,18 +413,27 @@ async def test_a_queued_edit_is_refused_if_edits_are_turned_off_while_it_waits()
     assert len(rig.sink.frames) == 1
 
 
-@pytest.mark.parametrize("how", ["close_session", "switched_off"])
-async def test_ending_the_session_fails_waiting_and_queued_calls(how: str) -> None:
+@pytest.mark.parametrize(
+    "how,queued_text",
+    [("close_session", ENDED), ("switched_off", OFF)],
+)
+async def test_ending_the_session_fails_waiting_and_queued_calls(
+    how: str, queued_text: str
+) -> None:
     rig = Rig()
     assert rig.sink is not None
     first = asyncio.create_task(rig.bridge.call_tool("get_errors", {}))
     second = asyncio.create_task(rig.bridge.call_tool("get_errors", {}))
     await settle()
+    if how == "switched_off":
+        rig.set(bridge_enabled=False)  # the route changes the state, then clears the secret
     getattr(rig.bridge, how)()
-    for task in (first, second):
-        with pytest.raises(ToolError) as err:
-            await task
-        assert err.value.message == UNKNOWN
+    with pytest.raises(ToolError) as err:
+        await first
+    assert err.value.message == UNKNOWN  # it reached the page
+    with pytest.raises(ToolError) as err:
+        await second
+    assert err.value.message == queued_text  # nothing reached the page
     assert len(rig.sink.frames) == 1
     assert rig.secret is not None
     assert not rig.bridge.secret_matches(rig.secret)
@@ -1020,7 +1030,7 @@ async def test_a_call_bound_to_an_old_session_never_reaches_the_page() -> None:
     rig.bridge.open_session()
     with pytest.raises(ToolError) as err:
         await rig.bridge.call_tool("get_errors", {}, token=token)
-    assert err.value.message == UNKNOWN
+    assert err.value.message == ENDED
     assert rig.sink.frames == []
 
 
@@ -1034,10 +1044,68 @@ async def test_a_call_bound_to_a_session_that_ends_while_queued_fails() -> None:
     await settle()
     rig.bridge.close_session()
     rig.bridge.open_session()
-    for task in (first, second):
-        with pytest.raises(ToolError):
-            await task
+    with pytest.raises(ToolError) as err:
+        await first
+    assert err.value.message == UNKNOWN
+    with pytest.raises(ToolError) as err:
+        await second
+    assert err.value.message == ENDED
     assert len(rig.sink.frames) == 1
+
+
+async def test_a_queued_call_after_a_switch_off_and_on_says_ended_not_unknown() -> None:
+    rig = Rig()
+    assert rig.sink is not None
+    first = asyncio.create_task(rig.bridge.call_tool("get_errors", {}))
+    second = asyncio.create_task(rig.bridge.call_tool("get_errors", {}))
+    await settle()
+    rig.set(bridge_enabled=False)
+    rig.bridge.switched_off()
+    rig.set(bridge_enabled=True)  # back on before the queued call gets the lock
+    with pytest.raises(ToolError):
+        await first
+    with pytest.raises(ToolError) as err:
+        await second
+    assert err.value.message == ENDED
+    assert len(rig.sink.frames) == 1
+
+
+async def test_an_ended_call_is_logged_as_ended(caplog: Any) -> None:
+    caplog.set_level(logging.INFO, logger="harness")
+    rig = Rig()
+    assert rig.secret is not None
+    token = rig.bridge.session_token(rig.secret)
+    rig.bridge.close_session()
+    with pytest.raises(ToolError):
+        await rig.bridge.call_tool("get_errors", {}, token=token)
+    assert "bridge get_errors ended" in caplog.text
+
+
+async def test_waiting_on_is_true_only_for_the_sink_a_call_waits_on() -> None:
+    rig = Rig()
+    assert rig.sink is not None
+    other = FakeSink()
+    assert not rig.bridge.waiting_on(rig.sink)
+    task = asyncio.create_task(rig.bridge.call_tool("get_errors", {}))
+    await settle()
+    assert rig.bridge.waiting_on(rig.sink)
+    assert not rig.bridge.waiting_on(other)
+    rig.bridge.reply(rig.sink, ok(rig.sink.frames[0], {}))
+    await task
+    assert not rig.bridge.waiting_on(rig.sink)
+
+
+def test_get_errors_says_what_its_prompt_field_holds() -> None:
+    text = next(t for t in TOOLS if t.name == "get_errors").description
+    assert "prompt" in text
+    assert "as a whole" in text
+    assert "null" in text
+
+
+def test_get_outputs_describes_its_result() -> None:
+    text = next(t for t in TOOLS if t.name == "get_outputs").description
+    assert "outputs, a list of {node, paths}" in text
+    assert "skipped" in text
 
 
 async def test_a_call_bound_to_the_live_session_relays() -> None:
