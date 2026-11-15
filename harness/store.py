@@ -165,9 +165,15 @@ def _check_owner_only(path: Path, st: os.stat_result, what: str) -> None:
         )
 
 
-def _printable(text: str, limit: int) -> str | None:
+def printable(text: str, limit: int) -> str | None:
     """The text if it is short and has no control characters, else None."""
     return text if len(text) <= limit and text.isprintable() else None
+
+
+def _check_plain_name(name: str) -> None:
+    """A file name directly in the data dir: no separators, not . or .."""
+    if not name or name in (".", "..") or "/" in name or "\0" in name:
+        raise ValueError("not a plain file name")
 
 
 class _ChoiceError(ValueError):
@@ -211,6 +217,21 @@ class Store:
         self._state = new_state
         return new_state
 
+    def write_private(self, name: str, data: bytes) -> None:
+        """Write an owner-only file in the data dir, through the checked dir fd."""
+        _check_plain_name(name)
+        with self._directory(create=False) as dir_fd:
+            self._atomic_write(dir_fd, name, data)
+
+    def remove_private(self, name: str) -> None:
+        """Remove a file from the data dir, through the checked dir fd; missing is fine."""
+        _check_plain_name(name)
+        with self._directory(create=False) as dir_fd:
+            try:
+                os.unlink(name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+
     def agent_choice(self, default_folder: Path) -> AgentChoice:
         """Read agent.json afresh. A bad file is reported, never replaced by a default."""
         with self._directory(create=False) as dir_fd:
@@ -249,7 +270,7 @@ class Store:
         if not isinstance(agent, str) or not isinstance(folder, str):
             raise _ChoiceError("agent and folder must be strings")
         if agent not in CLIS:
-            shown = _printable(agent, MAX_AGENT_ECHO)
+            shown = printable(agent, MAX_AGENT_ECHO)
             raise _ChoiceError(
                 f'unknown agent "{shown}"'
                 if shown is not None
@@ -258,7 +279,7 @@ class Store:
         if not os.path.isabs(folder):
             raise _ChoiceError("folder must be a full path")
         if not os.path.isdir(folder):
-            shown = _printable(folder, MAX_FOLDER_ECHO)
+            shown = printable(folder, MAX_FOLDER_ECHO)
             raise _ChoiceError(
                 f"folder does not exist: {shown}"
                 if shown is not None

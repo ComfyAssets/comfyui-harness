@@ -554,3 +554,55 @@ def test_an_agent_file_owned_by_someone_else_is_ignored(tmp_path):
 def test_an_oversize_agent_file_is_ignored(tmp_path):
     r = ignored(tmp_path, " " * (1024 * 1024 + 1))
     assert r.reason == "file is too large"
+
+
+def test_write_private_writes_owner_only_through_the_data_dir(tmp_path):
+    store = Store(tmp_path / "data")
+    store.open()
+    store.write_private("mcp.json", b"{}")
+    target = store.data_dir / "mcp.json"
+    assert target.read_bytes() == b"{}"
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o600
+    store.write_private("mcp.json", b"[]")
+    assert target.read_bytes() == b"[]"
+
+
+def test_remove_private_removes_and_tolerates_a_missing_file(tmp_path):
+    store = Store(tmp_path / "data")
+    store.open()
+    store.write_private("mcp.json", b"{}")
+    store.remove_private("mcp.json")
+    assert not (store.data_dir / "mcp.json").exists()
+    store.remove_private("mcp.json")
+
+
+@pytest.mark.parametrize("name", ["", ".", "..", "a/b", "../x", "/etc/x"])
+def test_private_file_names_must_be_plain(tmp_path, name):
+    store = Store(tmp_path / "data")
+    store.open()
+    with pytest.raises(ValueError):
+        store.write_private(name, b"x")
+    with pytest.raises(ValueError):
+        store.remove_private(name)
+
+
+def test_write_private_refuses_a_data_dir_open_to_others(tmp_path):
+    store = Store(tmp_path / "data")
+    store.open()
+    store.data_dir.chmod(0o755)
+    with pytest.raises(StoreError) as e:
+        store.write_private("mcp.json", b"{}")
+    assert e.value.code == "unsafe_permissions"
+    assert not (store.data_dir / "mcp.json").exists()
+
+
+def test_write_private_refuses_a_symlinked_data_dir(tmp_path):
+    store = Store(tmp_path / "data")
+    store.open()
+    real = tmp_path / "real"
+    store.data_dir.rename(real)
+    store.data_dir.symlink_to(real)
+    with pytest.raises(StoreError) as e:
+        store.write_private("mcp.json", b"{}")
+    assert e.value.code == "unsafe_permissions"
+    assert not (real / "mcp.json").exists()

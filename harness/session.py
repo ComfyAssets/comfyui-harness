@@ -15,7 +15,7 @@ from typing import Any, Callable, Mapping, Optional, Protocol
 from . import cli as cli_mod
 from . import launch as launch_mod
 from .guard import STATUS, Refusal
-from .store import StoreError
+from .store import DEFAULT_AGENT, MAX_FOLDER_ECHO, StoreError, printable
 
 IDLE_SECONDS = 1800
 DETACHED_LIMIT_SECONDS = 43200
@@ -28,11 +28,16 @@ LAUNCH_FILES = (launch_mod.CLAUDE_FILE, launch_mod.COPILOT_FILE)
 log = logging.getLogger("harness")
 
 
-def _unlink_quietly(path: Path) -> None:
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        pass
+def _store_refusal(error: StoreError) -> Refusal:
+    code = error.code if error.code in STATUS else "bad_state"
+    return Refusal(code, str(error))
+
+
+def _folder_missing(folder: Path) -> Refusal:
+    shown = printable(str(folder), MAX_FOLDER_ECHO)
+    if shown is None:
+        return Refusal("folder_missing", "The agent's folder is gone (path not shown).")
+    return Refusal("folder_missing", f"The agent's folder is gone: {shown}")
 
 
 class Sink(Protocol):
@@ -112,28 +117,33 @@ class SessionManager:
         try:
             choice = self._store.agent_choice(self._default_folder)
         except StoreError as error:
-            code = error.code if error.code in STATUS else "bad_state"
-            raise Refusal(code, str(error)) from error
+            raise _store_refusal(error) from error
         if choice.source == "ignored":
             # Its agent and folder are placeholders: never start them.
             raise Refusal("agent_choice_ignored", choice.reason)
         return choice
 
     def _changed_since_last(self, choice: Any) -> bool:
-        """True when a session was recorded and it used another agent or folder."""
+        """True when the last session used another agent or folder.
+
+        No record means an install from before the choice, which could only
+        have run claude in the default folder.
+        """
         state = self._store.state
-        if not state.last_agent:
-            return False  # no record yet (an install from before the choice)
-        return (state.last_agent, state.last_folder) != (choice.agent, str(choice.folder))
+        last = (state.last_agent, state.last_folder)
+        if not state.last_agent and not state.last_folder:
+            last = (DEFAULT_AGENT, str(self._default_folder))
+        return last != (choice.agent, str(choice.folder))
 
     def _write_launch_files(self, files: Mapping[str, bytes]) -> None:
-        data_dir = self._store.data_dir
         try:
             for name in LAUNCH_FILES:
                 if name not in files:
-                    _unlink_quietly(data_dir / name)
+                    self._store.remove_private(name)
             for name, body in files.items():
-                cli_mod._write_private_atomically(data_dir / name, body)
+                self._store.write_private(name, body)
+        except StoreError as error:
+            raise _store_refusal(error) from error
         except OSError as error:
             reason = error.strerror or type(error).__name__
             raise Refusal("spawn_failed", f"Could not write the MCP config: {reason}") from error
@@ -146,7 +156,7 @@ class SessionManager:
             return
         try:
             self._store.update(lambda s: replace(s, last_agent=agent, last_folder=folder))
-        except (OSError, StoreError) as error:
+        except Exception as error:  # noqa: BLE001 - bookkeeping never ends a live session
             log.warning("could not record the session's agent: %s", type(error).__name__)
 
     def _spawn(
@@ -161,6 +171,10 @@ class SessionManager:
         resume: bool,
         secret: Optional[str],
     ) -> None:
+        folder = choice.folder
+        # Before any file is written, so a refusal leaves no secret-bearing file behind.
+        if not os.path.isdir(folder):
+            raise _folder_missing(folder)
         fresh_after_change = resume and self._changed_since_last(choice)
         servers = cli_mod.mcp_servers(url, canvas_secret=secret)
         launch = launch_mod.plan_launch(
@@ -169,9 +183,6 @@ class SessionManager:
         self._write_launch_files(launch.files)
         env = cli_mod.build_env(os.environ)
         env.update(launch.env)
-        folder = choice.folder
-        if not os.path.isdir(folder):
-            raise Refusal("folder_missing", f"The agent's folder is gone: {folder}")
         host = self._host_factory()
         now = self._clock()
         self._host = host

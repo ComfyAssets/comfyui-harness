@@ -658,10 +658,10 @@ def test_a_failed_spawn_closes_the_bridge_session(bmgr, host, bridge):
 
 
 def test_a_failed_mcp_write_closes_the_bridge_session(bmgr, bridge, monkeypatch):
-    def unwritable(path, data):
-        raise IsADirectoryError(21, "Is a directory", str(path))
+    def unwritable(name, data):
+        raise IsADirectoryError(21, "Is a directory", name)
 
-    monkeypatch.setattr(cli_mod, "_write_private_atomically", unwritable)
+    monkeypatch.setattr(bmgr._store, "write_private", unwritable)
     with pytest.raises(Refusal):
         bmgr.start(FakeSink(), 80, 24, False)
     assert bridge.closed == 1
@@ -716,10 +716,10 @@ def test_a_failing_host_factory_closes_the_bridge_session(store, folder, clock, 
 
 
 def test_a_non_oserror_from_the_mcp_write_closes_the_bridge_session(bmgr, bridge, monkeypatch):
-    def boom(path, data):
+    def boom(name, data):
         raise ValueError("boom")
 
-    monkeypatch.setattr(cli_mod, "_write_private_atomically", boom)
+    monkeypatch.setattr(bmgr._store, "write_private", boom)
     with pytest.raises(ValueError):
         bmgr.start(FakeSink(), 80, 24, False)
     assert bridge.closed == 1
@@ -832,6 +832,22 @@ def test_an_ignored_choice_blocks_the_start_and_spawns_nothing(bmgr, made, bridg
     assert bmgr.info() is None
 
 
+def test_a_missing_folder_with_a_control_character_is_not_echoed(made, store, tmp_path, clock):
+    mgr = SessionManager(made, store, tmp_path / "a\x1b[31mb", lambda: URL, clock)
+    with pytest.raises(Refusal) as e:
+        mgr.start(FakeSink(), 80, 24, False)
+    assert e.value.code == "folder_missing"
+    assert e.value.message == "The agent's folder is gone (path not shown)."
+    assert "\x1b" not in e.value.message
+
+
+def test_a_missing_long_folder_is_not_echoed(made, store, tmp_path, clock):
+    mgr = SessionManager(made, store, tmp_path / ("d" * 300), lambda: URL, clock)
+    with pytest.raises(Refusal) as e:
+        mgr.start(FakeSink(), 80, 24, False)
+    assert e.value.message == "The agent's folder is gone (path not shown)."
+
+
 def test_a_missing_default_folder_is_folder_missing(made, store, tmp_path, clock):
     mgr = SessionManager(made, store, tmp_path / "gone", lambda: URL, clock)
     with pytest.raises(Refusal) as e:
@@ -858,6 +874,65 @@ def test_a_folder_removed_after_the_choice_is_read_is_folder_missing(
     assert e.value.code == "folder_missing"
     assert made.calls == []
     assert bridge.opened == bridge.closed
+
+
+def test_a_missing_folder_leaves_no_launch_file_behind(bmgr, made, store, project, monkeypatch):
+    save_choice(store, "copilot", project)
+    read = store.agent_choice
+
+    def read_then_remove(default_folder):
+        choice = read(default_folder)
+        project.rmdir()
+        return choice
+
+    monkeypatch.setattr(store, "agent_choice", read_then_remove)
+    with pytest.raises(Refusal):
+        bmgr.start(FakeSink(), 80, 24, False)
+    assert not (store.data_dir / "copilot-mcp.json").exists()
+    assert not store.mcp_path.exists()
+
+
+def unsafe_after_reading(store, monkeypatch, make_unsafe):
+    read = store.agent_choice
+
+    def read_then_break(default_folder):
+        choice = read(default_folder)
+        make_unsafe()
+        return choice
+
+    monkeypatch.setattr(store, "agent_choice", read_then_break)
+
+
+def test_a_data_dir_opened_to_others_refuses_instead_of_writing(mgr, made, store, monkeypatch):
+    unsafe_after_reading(store, monkeypatch, lambda: store.data_dir.chmod(0o755))
+    with pytest.raises(Refusal) as e:
+        mgr.start(FakeSink(), 80, 24, False)
+    assert e.value.code == "unsafe_permissions"
+    assert not store.mcp_path.exists()
+    assert made.calls == []
+
+
+def test_a_symlinked_data_dir_refuses_instead_of_writing(mgr, made, store, tmp_path, monkeypatch):
+    elsewhere = tmp_path / "elsewhere"
+
+    def swap_for_a_link():
+        store.data_dir.rename(elsewhere)
+        store.data_dir.symlink_to(elsewhere)
+
+    unsafe_after_reading(store, monkeypatch, swap_for_a_link)
+    with pytest.raises(Refusal) as e:
+        mgr.start(FakeSink(), 80, 24, False)
+    assert e.value.code == "unsafe_permissions"
+    assert not (elsewhere / "mcp.json").exists()
+    assert made.calls == []
+
+
+def test_a_stale_launch_file_is_removed_through_the_data_dir(mgr, store, project):
+    stale = store.data_dir / "copilot-mcp.json"
+    stale.write_text("{}")
+    save_choice(store, "codex", project)
+    mgr.start(FakeSink(), 80, 24, False)
+    assert not stale.exists()
 
 
 def test_a_successful_start_records_the_agent_and_folder(mgr, store, project):
@@ -899,20 +974,44 @@ def test_a_fresh_start_after_a_change_is_not_reported_as_one(mgr, store, project
     assert mgr.info()["fresh_after_change"] is False
 
 
-def test_resume_with_no_recorded_session_resumes(mgr, host, folder):
-    # Installs from before this release have no record; they keep resuming.
+def test_resume_with_no_record_and_the_default_claude_resumes(mgr, host, folder):
+    # Installs from before this release have no record and could only run claude
+    # in the default folder; they keep resuming.
     mgr.start(FakeSink(), 80, 24, True)
     assert host.started.argv[-1] == "--continue"
     assert mgr.info()["fresh_after_change"] is False
 
 
-def test_a_state_write_failure_after_the_spawn_keeps_the_session(mgr, store, monkeypatch):
+def test_resume_with_no_record_and_a_saved_codex_starts_fresh(mgr, host, store, project):
+    save_choice(store, "codex", project)
+    mgr.start(FakeSink(), 80, 24, True)
+    assert host.started.argv == ["/bin/codex", *host.started.argv[1:]]
+    assert "resume" not in host.started.argv
+    assert mgr.info()["fresh_after_change"] is True
+
+
+def test_resume_with_no_record_and_claude_in_another_folder_starts_fresh(mgr, host, store, project):
+    save_choice(store, "claude", project)
+    mgr.start(FakeSink(), 80, 24, True)
+    assert "--continue" not in host.started.argv
+    assert mgr.info()["fresh_after_change"] is True
+
+
+@pytest.mark.parametrize(
+    "error", [OSError(28, "No space left on device"), RuntimeError("bookkeeping")]
+)
+def test_a_state_write_failure_after_the_spawn_keeps_the_session(
+    bmgr, bridge, store, project, monkeypatch, error
+):
+    save_choice(store, "codex", project)  # differs from the record, so update runs
+
     def broken(change):
-        raise OSError(28, "No space left on device")
+        raise error
 
     monkeypatch.setattr(store, "update", broken)
-    mgr.start(FakeSink(), 80, 24, False)
-    assert mgr.info() is not None
+    bmgr.start(FakeSink(), 80, 24, False)
+    assert bmgr.info() is not None
+    assert bridge.opened == 1 and bridge.closed == 0
 
 
 def test_an_unusable_data_dir_refuses_the_start(mgr, made, store, monkeypatch):
