@@ -42,6 +42,15 @@ function fakeTerminalModule() {
     write(bytes) { this.written.push(bytes); }
     onData(cb) { this.dataCb = cb; }
     onResize(cb) { this.resizeCb = cb; }
+    // The wheel hook and what it reads: which screen, mouse tracking, SGR mode, the canvas box.
+    attachCustomWheelEventHandler(fn) { this.wheelCb = fn; }
+    get buffer() { return { active: { type: this.screen ?? "normal" } }; }
+    hasMouseTracking() { return this.mouse === true; }
+    getMode(mode, ansi) { return mode === 1006 && ansi === false && this.sgr === true; }
+    get element() {
+      const canvas = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 480 }) };
+      return { querySelector: (selector) => (selector === "canvas" && !this.noCanvas ? canvas : null) };
+    }
     focus() { this.focused++; }
     blur() {}
     dispose() {}
@@ -290,6 +299,69 @@ test("a dropped connection shows reconnecting; 4401 shows pairing; 4409 shows sw
   const other = await openReady();
   other.socket().drop(4401);
   assert.ok(byText(other.panel.element, "Pair this browser", "BUTTON"));
+});
+
+test("Ctrl+Z typed in the terminal is not sent; other control bytes and pastes are", async () => {
+  const env = await openReady();
+  const [term] = env.mod.terms;
+  const before = env.socket().sent.length;
+  term.dataCb("\x1a");
+  assert.equal(env.socket().sent.length, before);
+  term.dataCb("\x1f");
+  assert.deepEqual([...env.socket().sent.at(-1)], [0x1f]);
+  term.dataCb("a\x1a");
+  assert.deepEqual([...env.socket().sent.at(-1)], [0x61, 0x1a]);
+});
+
+// 80x24 cells on an 800x480 canvas: 10x20 pixel cells.
+const wheelEvent = (deltaY) => ({ deltaY, deltaMode: 0, clientX: 15, clientY: 25 });
+const sentText = (env) => new TextDecoder().decode(env.socket().sent.at(-1));
+
+test("the wheel sends SGR wheel reports when a full-screen program tracks the mouse", async () => {
+  const env = await openReady();
+  const [term] = env.mod.terms;
+  Object.assign(term, { screen: "alternate", mouse: true, sgr: true });
+  assert.equal(term.wheelCb(wheelEvent(-20)), true);
+  assert.equal(sentText(env), "\x1b[<64;2;2M");
+  assert.equal(term.wheelCb(wheelEvent(40)), true);
+  assert.equal(sentText(env), "\x1b[<65;2;2M\x1b[<65;2;2M");
+});
+
+test("the wheel sends legacy reports when the program did not ask for SGR", async () => {
+  const env = await openReady();
+  const [term] = env.mod.terms;
+  Object.assign(term, { screen: "alternate", mouse: true, sgr: false });
+  assert.equal(term.wheelCb(wheelEvent(-20)), true);
+  assert.equal(sentText(env), "\x1b[M`\"\"");
+});
+
+test("a wheel move under one row sends nothing, and no arrow keys either", async () => {
+  const env = await openReady();
+  const [term] = env.mod.terms;
+  Object.assign(term, { screen: "alternate", mouse: true, sgr: true });
+  const before = env.socket().sent.length;
+  assert.equal(term.wheelCb(wheelEvent(5)), true);
+  assert.equal(env.socket().sent.length, before);
+});
+
+test("with no canvas to measure, the wheel sends nothing rather than arrow keys", async () => {
+  const env = await openReady();
+  const [term] = env.mod.terms;
+  Object.assign(term, { screen: "alternate", mouse: true, sgr: true, noCanvas: true });
+  const before = env.socket().sent.length;
+  assert.equal(term.wheelCb(wheelEvent(-100)), true);
+  assert.equal(env.socket().sent.length, before);
+});
+
+test("the wheel keeps its own behaviour on the normal screen or without mouse tracking", async () => {
+  const env = await openReady();
+  const [term] = env.mod.terms;
+  const before = env.socket().sent.length;
+  for (const state of [{ screen: "normal", mouse: true }, { screen: "alternate", mouse: false }, { screen: "normal", mouse: false }]) {
+    Object.assign(term, state, { sgr: true });
+    assert.equal(term.wheelCb(wheelEvent(-100)), false);
+  }
+  assert.equal(env.socket().sent.length, before);
 });
 
 test("typed data goes out as UTF-8 bytes and resizes as messages; bytes in are written", async () => {
