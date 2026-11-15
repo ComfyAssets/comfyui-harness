@@ -26,7 +26,7 @@ class Cli:
     resume_args: tuple[str, ...]
     resume_is_subcommand: bool
     forbidden: tuple[str, ...]
-    mcp: str  # claude_file | codex_overrides | opencode_env | copilot_file | gemini_settings
+    mcp: str  # claude_file | codex_overrides | opencode_env | copilot_file
 
 
 _CLAUDE_FORBIDDEN = (
@@ -57,15 +57,6 @@ _COPILOT_FORBIDDEN = (
     "--assisted-approval",
     "--mode",
     "--trust-folder",
-)
-_GEMINI_FORBIDDEN = (
-    "--yolo",
-    "-y",
-    "--approval-mode",
-    "--sandbox",
-    "-s",
-    "--skip-trust",
-    "--allowed-tools",
 )
 
 CLIS: Mapping[str, Cli] = {
@@ -112,17 +103,6 @@ CLIS: Mapping[str, Cli] = {
         False,
         _COPILOT_FORBIDDEN,
         "copilot_file",
-    ),
-    "gemini": Cli(
-        "gemini",
-        "Gemini CLI",
-        "gemini",
-        "npm i -g @google/gemini-cli",
-        (),
-        ("--resume", "latest"),
-        False,
-        _GEMINI_FORBIDDEN,
-        "gemini_settings",
     ),
 }
 AGENT_IDS = tuple(CLIS)

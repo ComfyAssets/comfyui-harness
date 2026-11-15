@@ -5,7 +5,7 @@ writes and starts nothing. The session writes `Launch.files` into the data dir
 (mode 600) and spawns `Launch.argv`. The bearer secret never goes on argv.
 
 Formats pinned against the installed tools (codex 0.166, opencode 2.2.7,
-copilot 1.0.112, gemini 0.66), each read back by the tool itself:
+copilot 1.0.112), each read back by the tool itself:
 
 - codex: `-c mcp_servers.<name>.command="…"`, `.env={K="v"}`, `.url="…"`,
   `.bearer_token_env_var="HARNESS_CANVAS_TOKEN"` (`codex mcp list --json`
@@ -17,11 +17,6 @@ copilot 1.0.112, gemini 0.66), each read back by the tool itself:
 - copilot: `--additional-mcp-config @file`, `{"mcpServers": {name: {"type":
   "local", "command", "args", "env", "tools": ["*"]} | {"type": "http", "url",
   "headers", "tools": ["*"]}}}` (`copilot mcp list` shows both).
-- gemini: `{"mcpServers": {name: {"command", "args", "env"} | {"httpUrl",
-  "headers"}}}` (`gemini mcp list` reads it as stdio and http). Gemini 0.66
-  loads GEMINI_CLI_SYSTEM_SETTINGS_PATH only when the file and every parent
-  directory are owned by root and not group or world writable, so a file in a
-  user-owned data dir is skipped with a "Security Warning".
 """
 
 import json
@@ -33,10 +28,8 @@ from .cli import Cli
 
 CANVAS_TOKEN_ENV = "HARNESS_CANVAS_TOKEN"  # nosec B105
 OPENCODE_ENV = "OPENCODE_CONFIG_CONTENT"
-GEMINI_ENV = "GEMINI_CLI_SYSTEM_SETTINGS_PATH"
 CLAUDE_FILE = "mcp.json"
 COPILOT_FILE = "copilot-mcp.json"
-GEMINI_FILE = "gemini-settings.json"
 BEARER = "Bearer "
 
 
@@ -157,30 +150,11 @@ def _copilot(servers: Mapping[str, dict], data_dir: Path) -> _Wiring:
     return _wiring(flags, files={COPILOT_FILE: body})
 
 
-def _gemini_server(entry: Mapping) -> dict:
-    if _is_http(entry):
-        server = {"httpUrl": entry["url"]}
-        if entry.get("headers"):
-            server["headers"] = dict(entry["headers"])
-        return server
-    return {
-        "command": entry["command"],
-        "args": list(entry.get("args", [])),
-        "env": dict(entry.get("env", {})),
-    }
-
-
-def _gemini(servers: Mapping[str, dict], data_dir: Path) -> _Wiring:
-    body = _json({"mcpServers": {n: _gemini_server(e) for n, e in servers.items()}})
-    return _wiring(env={GEMINI_ENV: str(data_dir / GEMINI_FILE)}, files={GEMINI_FILE: body})
-
-
 _MODES: Mapping[str, Callable[[Mapping[str, dict], Path], _Wiring]] = {
     "claude_file": _claude,
     "codex_overrides": _codex,
     "opencode_env": _opencode,
     "copilot_file": _copilot,
-    "gemini_settings": _gemini,
 }
 
 

@@ -121,29 +121,6 @@ def test_copilot_reads_an_additional_config_file():
     assert SECRET not in joined(launch)
 
 
-def test_gemini_points_system_settings_at_a_file_holding_only_mcp_servers():
-    launch = plan("gemini")
-    assert launch.argv == (str(EXE),)
-    path = str(DATA / "gemini-settings.json")
-    assert launch.env == {"GEMINI_CLI_SYSTEM_SETTINGS_PATH": path}
-    assert list(launch.files) == ["gemini-settings.json"]
-    body = json.loads(launch.files["gemini-settings.json"])
-    assert body == {
-        "mcpServers": {
-            "comfy-mcp": {
-                "command": "/v/bin/comfy-mcp",
-                "args": [],
-                "env": {"COMFYUI_URL": "http://127.0.0.1:8188"},
-            },
-            "canvas": {
-                "httpUrl": "http://127.0.0.1:8188/harness/mcp",
-                "headers": {"Authorization": "Bearer " + SECRET},
-            },
-        }
-    }
-    assert SECRET not in joined(launch)
-
-
 @pytest.mark.parametrize("agent", list(CLIS))
 def test_no_servers_means_no_mcp_wiring(agent):
     launch = plan(agent, {})

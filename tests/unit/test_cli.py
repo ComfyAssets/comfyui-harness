@@ -40,7 +40,7 @@ def test_no_cli_argument_list_weakens_permissions():
 
 
 def test_cli_table_lists_five_agents():
-    assert AGENT_IDS == ("claude", "codex", "opencode", "copilot", "gemini")
+    assert AGENT_IDS == ("claude", "codex", "opencode", "copilot")
     assert [(c.id, c.name, c.executable, c.install, c.mcp) for c in CLIS.values()] == [
         (
             "claude",
@@ -52,7 +52,6 @@ def test_cli_table_lists_five_agents():
         ("codex", "Codex CLI", "codex", "npm i -g @openai/codex", "codex_overrides"),
         ("opencode", "opencode", "opencode", "npm i -g opencode-ai", "opencode_env"),
         ("copilot", "Copilot CLI", "copilot", "npm i -g @github/copilot", "copilot_file"),
-        ("gemini", "Gemini CLI", "gemini", "npm i -g @google/gemini-cli", "gemini_settings"),
     ]
 
 
@@ -61,7 +60,6 @@ def test_resume_forms():
     assert CLIS["codex"].resume_args == ("resume", "--last")
     assert CLIS["opencode"].resume_args == ("--continue",)
     assert CLIS["copilot"].resume_args == ("--continue",)
-    assert CLIS["gemini"].resume_args == ("--resume", "latest")
     assert [c.id for c in CLIS.values() if c.resume_is_subcommand] == ["codex"]
 
 
@@ -71,7 +69,6 @@ def test_resume_forms():
         ("claude", ("--dangerously-skip-permissions", "--permission-mode")),
         ("codex", ("--dangerously-bypass-approvals-and-sandbox", "--full-auto")),
         ("opencode", ("--auto",)),
-        ("gemini", ("--yolo", "-y", "--approval-mode")),
         ("copilot", ("--allow-all-tools", "--allow-all", "--yolo", "--assisted-approval")),
     ],
 )
