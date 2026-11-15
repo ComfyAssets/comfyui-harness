@@ -9,7 +9,7 @@ from aiohttp import web
 from harness.mcp import MAX_BODY
 from harness.pairing import COOKIE_IDLE
 from harness.routes import Deps
-from harness.store import Store, StoreError
+from harness.store import AgentChoice, Store, StoreError
 
 from conftest import ORIGIN, PREFIXES, UA, make_client, pair
 
@@ -44,6 +44,33 @@ async def test_status_for_paired_caller_adds_cli_and_session(client, deps):
         "bridge_reason": "unsupported",  # no Bridge was built for these deps
         "bridge_live": False,
     }
+
+
+async def test_status_for_paired_caller_carries_the_agent_fields(client, deps, store):
+    deps.cli_status = lambda choice: {
+        "agent": choice.agent,
+        "agent_folder": str(choice.folder),
+        "agent_choice": choice.source,
+    }
+    deps.default_folder = store.data_dir
+    headers, _ = await pair(client, deps)
+    body = await (await client.get("/harness/status", headers=same_origin(headers))).json()
+    assert body["agent"] == "claude"
+    assert body["agent_folder"] == str(store.data_dir)
+    assert body["agent_choice"] == "default"
+
+
+async def test_status_passes_the_saved_choice_to_the_cli_status(client, deps, tmp_path):
+    folder = tmp_path / "work"
+    folder.mkdir()
+    (deps.store.data_dir / "agent.json").write_text(
+        json.dumps({"agent": "codex", "folder": str(folder)})
+    )
+    (deps.store.data_dir / "agent.json").chmod(0o600)
+    deps.cli_status = lambda choice: {"agent": choice.agent, "agent_choice": choice.source}
+    headers, _ = await pair(client, deps)
+    body = await (await client.get("/harness/status", headers=same_origin(headers))).json()
+    assert (body["agent"], body["agent_choice"]) == ("codex", "saved")
 
 
 # Found in Chromium: a page on another address of the same server carries the cookie,
@@ -294,7 +321,7 @@ async def test_store_error_surfaces_on_every_route(aiohttp_client, deps, code, m
         supported=True,
         node_dir=deps.node_dir,
         comfy_url=lambda: "http://127.0.0.1:8188",
-        cli_status=lambda: {},
+        cli_status=lambda choice: {},
         clock=deps.clock,
     )
     client = await make_client(aiohttp_client, broken)
@@ -385,7 +412,11 @@ async def test_install_registers_only_the_plain_prefix(monkeypatch, tmp_path):
     assert "/harness/status" in paths
     assert not any(p.startswith("/api") for p in paths)
     assert deps.store_error is None
-    assert set(deps.cli_status()) == {"cli_found", "mcp_found"}
+    assert deps.default_folder == tmp_path / "user"
+    choice = AgentChoice("claude", tmp_path, "default", "")  # folder is only echoed
+    assert {"cli_found", "mcp_found", "agent", "agents_installed", "pair_script"} <= set(
+        deps.cli_status(choice)
+    )
     assert deps.comfy_url() == "http://127.0.0.1:8188"
 
 

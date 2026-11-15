@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from harness import cli as harness_cli
+from harness.store import AgentChoice
 from harness.cli import (
     AGENT_IDS,
     CLIS,
@@ -360,13 +362,90 @@ def test_env_does_not_mutate_its_input():
     assert base == {"COMFYUI_HARNESS_X": "1"}
 
 
+def choice_of(agent="claude", folder=Path("/"), source="default", reason=""):
+    return AgentChoice(agent, folder, source, reason)
+
+
 def test_status_reports_cli_and_mcp(tmp_path):
     make_exe(tmp_path / "pathbin" / "claude")
-    assert status(**lookup(tmp_path)) == {"cli_found": True, "mcp_found": False}
+    body = status(choice_of(folder=tmp_path), **lookup(tmp_path))
+    assert (body["cli_found"], body["mcp_found"]) == (True, False)
     make_exe(tmp_path / "venv" / "bin" / "comfy-mcp")
-    assert status(**lookup(tmp_path)) == {"cli_found": True, "mcp_found": True}
-    neither = status(str(tmp_path / "none"), tmp_path, python="/nowhere/python")
-    assert neither == {"cli_found": False, "mcp_found": False}
+    body = status(choice_of(folder=tmp_path), **lookup(tmp_path))
+    assert (body["cli_found"], body["mcp_found"]) == (True, True)
+    neither = status(
+        choice_of(folder=tmp_path), str(tmp_path / "none"), tmp_path, "/nowhere/python"
+    )
+    assert (neither["cli_found"], neither["mcp_found"]) == (False, False)
+
+
+def test_status_describes_the_chosen_agent(tmp_path):
+    make_exe(tmp_path / "pathbin" / "codex")
+    body = status(choice_of("codex", tmp_path, "saved"), **lookup(tmp_path))
+    assert body["agent"] == "codex"
+    assert body["agent_name"] == "Codex CLI"
+    assert body["agent_found"] is True
+    assert body["cli_found"] is True  # equals agent_found: no claude is installed
+    assert body["agent_install"] == "npm i -g @openai/codex"
+    assert body["agent_folder"] == str(tmp_path)
+    assert body["agent_folder_ok"] is True
+    assert body["agent_choice"] == "saved"
+    assert body["agent_choice_reason"] == ""
+    assert body["agents_installed"] == ["codex"]
+
+
+def test_status_cli_found_follows_the_chosen_agent_not_claude(tmp_path):
+    make_exe(tmp_path / "pathbin" / "claude")
+    body = status(choice_of("codex", tmp_path, "saved"), **lookup(tmp_path))
+    assert body["agent_found"] is False
+    assert body["cli_found"] is False
+    assert body["agents_installed"] == ["claude"]
+
+
+def test_agents_installed_lists_only_found_agents_in_table_order(tmp_path):
+    for name in ("copilot", "claude", "opencode"):
+        make_exe(tmp_path / "pathbin" / name)
+    body = status(choice_of(folder=tmp_path), **lookup(tmp_path))
+    assert body["agents_installed"] == ["claude", "opencode", "copilot"]
+
+
+def test_status_flags_a_missing_folder(tmp_path):
+    body = status(choice_of(folder=tmp_path / "gone"), **lookup(tmp_path))
+    assert body["agent_folder_ok"] is False
+
+
+def test_ignored_choice_reports_the_reason_and_the_default_agent(tmp_path):
+    make_exe(tmp_path / "pathbin" / "claude")
+    ignored = choice_of("claude", tmp_path, "ignored", 'unknown agent "x"')
+    body = status(ignored, **lookup(tmp_path))
+    assert body["agent_choice"] == "ignored"
+    assert body["agent_choice_reason"] == 'unknown agent "x"'
+    assert body["agent"] == "claude"
+    assert body["agent_found"] is True
+    assert body["agent_folder_ok"] is True
+
+
+def test_ignored_for_a_missing_folder_is_not_folder_ok(tmp_path):
+    ignored = choice_of("claude", tmp_path, "ignored", "folder does not exist: /gone")
+    body = status(ignored, **lookup(tmp_path))
+    assert body["agent_folder_ok"] is False
+
+
+def test_status_unprompted_follows_the_agents_own_setting(tmp_path):
+    settings = tmp_path / "home" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text('{"permissions": {"defaultMode": "bypassPermissions"}}')
+    body = status(choice_of(folder=tmp_path), **lookup(tmp_path))
+    assert body["agent_unprompted"] is True
+    copilot = status(choice_of("copilot", tmp_path), **lookup(tmp_path))
+    assert copilot["agent_unprompted"] is None
+
+
+def test_pair_script_is_the_absolute_path_beside_the_harness_package(tmp_path):
+    body = status(choice_of(folder=tmp_path), **lookup(tmp_path))
+    expected = Path(harness_cli.__file__).absolute().parent.parent / "pair.py"
+    assert body["pair_script"] == str(expected)
+    assert Path(body["pair_script"]).is_absolute()
 
 
 def test_failed_replace_removes_the_temp_file_and_raises(tmp_path, monkeypatch):

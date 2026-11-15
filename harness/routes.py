@@ -31,7 +31,7 @@ from .guard import (
 )
 from .pairing import COOKIE_MAX, Pairing
 from .session import SessionManager
-from .store import Browser, Store, StoreError
+from .store import AgentChoice, Browser, Store, StoreError
 from .terminal import Terminal
 
 log = logging.getLogger("harness")
@@ -62,8 +62,9 @@ class Deps:
     supported: bool
     node_dir: Path
     comfy_url: Callable[[], str]
-    cli_status: Callable[[], dict]
+    cli_status: Callable[[AgentChoice], dict]
     clock: Callable[[], float] = time.time
+    default_folder: Optional[Path] = None  # where an unchosen session starts
     terminal: Optional[Terminal] = None
     bridge: Optional[Bridge] = None
 
@@ -261,7 +262,8 @@ def setup(routes: web.RouteTableDef, deps: Deps, prefix: str = "/harness") -> No
             "enabled": store().state.enabled,
         }
         if browser is not None:
-            body.update(deps.cli_status())
+            choice = store().agent_choice(deps.default_folder or deps.node_dir)
+            body.update(deps.cli_status(choice))
             body["session"] = None if deps.sessions is None else deps.sessions.info()
             # The page compares this with its own address; the socket refuses others.
             body["origin"] = browser.origin
@@ -458,6 +460,7 @@ def install(prompt_server: Any) -> Deps:
         node_dir=node_dir,
         comfy_url=lambda: cli.comfy_url(listen, prompt_server.port, tls),
         cli_status=cli.status,
+        default_folder=Path(folder_paths.base_path),
     )
     if supported and store is not None:
         deps.bridge = _build_bridge(deps, store, folder_paths)

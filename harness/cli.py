@@ -12,8 +12,13 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import TYPE_CHECKING, Callable, Mapping, Optional
 from urllib.parse import urlsplit
+
+from .unprompted import unprompted
+
+if TYPE_CHECKING:  # store imports this module
+    from .store import AgentChoice
 
 
 @dataclass(frozen=True)
@@ -318,14 +323,45 @@ def build_env(base: Mapping[str, str]) -> dict[str, str]:
     return env
 
 
+def _is_found(cli_id: str, path: Optional[str], home: Optional[Path]) -> bool:
+    try:
+        find(cli_id, path, home)
+    except CliNotFound:
+        return False
+    return True
+
+
+def _folder_ok(choice: "AgentChoice") -> bool:
+    if choice.source == "ignored" and choice.reason.startswith("folder does not exist"):
+        return False
+    return choice.folder.is_dir()
+
+
 def status(
+    choice: "AgentChoice",
     path: Optional[str] = None,
     home: Optional[Path] = None,
     python: Optional[str] = None,
-) -> dict[str, bool]:
-    try:
-        find("claude", path, home)
-        cli_found = True
-    except CliNotFound:
-        cli_found = False
-    return {"cli_found": cli_found, "mcp_found": find_mcp_server(python, path, home) is not None}
+) -> dict:
+    """What a paired page needs: the chosen agent, the folder, what else is installed.
+
+    An ignored choice is shown as the default agent for display only; the store
+    has already put the default in `choice` and put the reason in `choice.reason`.
+    """
+    cli = CLIS[choice.agent]
+    found = _is_found(choice.agent, path, home)
+    return {
+        "cli_found": found,
+        "mcp_found": find_mcp_server(python, path, home) is not None,
+        "agent": cli.id,
+        "agent_name": cli.name,
+        "agent_found": found,
+        "agent_install": cli.install,
+        "agent_folder": str(choice.folder),
+        "agent_folder_ok": _folder_ok(choice),
+        "agent_choice": choice.source,
+        "agent_choice_reason": choice.reason,
+        "agent_unprompted": unprompted(cli.id, Path.home() if home is None else home),
+        "agents_installed": [i for i in AGENT_IDS if _is_found(i, path, home)],
+        "pair_script": str(Path(__file__).absolute().parent.parent / "pair.py"),
+    }

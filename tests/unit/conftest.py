@@ -69,7 +69,7 @@ def deps(store, clock, node_dir):
         supported=True,
         node_dir=node_dir,
         comfy_url=lambda: "http://127.0.0.1:8188",
-        cli_status=lambda: {"cli_found": True, "mcp_found": False},
+        cli_status=lambda choice: {"cli_found": True, "mcp_found": False},
         clock=clock,
     )
 
