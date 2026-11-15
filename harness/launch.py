@@ -31,7 +31,7 @@ from typing import Callable, Mapping, Optional, Sequence
 
 from .cli import Cli
 
-CANVAS_TOKEN_ENV = "HARNESS_CANVAS_TOKEN"  # nosec B105: an env var name, not a secret
+CANVAS_TOKEN_ENV = "HARNESS_CANVAS_TOKEN"  # nosec B105
 OPENCODE_ENV = "OPENCODE_CONFIG_CONTENT"
 GEMINI_ENV = "GEMINI_CLI_SYSTEM_SETTINGS_PATH"
 CLAUDE_FILE = "mcp.json"
