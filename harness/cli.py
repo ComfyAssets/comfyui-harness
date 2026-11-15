@@ -54,6 +54,7 @@ _COPILOT_FORBIDDEN = (
     "--allow-url",
     "--yolo",
     "--autopilot",
+    "--assisted-approval",
     "--mode",
     "--trust-folder",
 )

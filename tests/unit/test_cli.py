@@ -72,7 +72,7 @@ def test_resume_forms():
         ("codex", ("--dangerously-bypass-approvals-and-sandbox", "--full-auto")),
         ("opencode", ("--auto",)),
         ("gemini", ("--yolo", "-y", "--approval-mode")),
-        ("copilot", ("--allow-all-tools", "--allow-all", "--yolo")),
+        ("copilot", ("--allow-all-tools", "--allow-all", "--yolo", "--assisted-approval")),
     ],
 )
 def test_every_agent_forbids_its_prompt_skipping_flags(agent, flags):
