@@ -587,7 +587,9 @@ def test_main_asks_after_pairing_when_no_agent_json(store, machine, scripted_mai
 def test_main_with_agent_json_prints_one_line_and_asks_nothing(store, machine, scripted_main):
     script = load_script()
     comfy = machine[2]
-    (store.data_dir / "agent.json").write_text(json.dumps({"agent": "codex", "folder": str(comfy)}))
+    path = store.data_dir / "agent.json"
+    path.write_text(json.dumps({"agent": "codex", "folder": str(comfy)}))
+    path.chmod(0o600)
 
     status, talk = scripted_main(script, store)
 
@@ -670,3 +672,154 @@ def test_no_code_and_no_setup_exits_2():
 
     assert result.returncode == 2
     assert "--setup" in result.stderr
+
+
+# --- fix round 1 --------------------------------------------------------------
+
+
+def test_setup_checks_the_default_folder_too(store, machine):
+    script = load_script()
+    bin_dir, home, comfy = machine
+    make_exe(bin_dir, "claude")
+    good = comfy.parent / "good"
+    good.mkdir()
+    comfy.rmdir()
+    talk = Talk("", "", str(good))
+
+    status = run_setup(script, store, comfy, talk, bin_dir, home)
+
+    assert status == 0
+    assert f"{comfy} is not a folder on this machine." in talk.said
+    assert saved(store)["folder"] == str(good)
+
+
+def test_setup_unusable_default_folder_is_not_offered_again(store, machine):
+    script = load_script()
+    bin_dir, home, comfy = machine
+    make_exe(bin_dir, "claude")
+    comfy.rmdir()
+    talk = Talk("", "", "")
+
+    def ask(prompt):
+        talk.prompts.append(prompt)
+        if len(talk.prompts) > 3:
+            raise EOFError
+        return talk.answers.pop(0)
+
+    script.setup(store.data_dir, comfy, ask, talk.say, str(bin_dir), home)
+
+    assert f"[{comfy}]" in talk.prompts[1]
+    assert "[" not in talk.prompts[2]
+    assert not (store.data_dir / "agent.json").exists()
+
+
+def test_setup_superscript_digit_is_not_a_choice(store, machine):
+    script = load_script()
+    bin_dir, home, comfy = machine
+    make_exe(bin_dir, "claude")
+    talk = Talk("²", "1", "")
+
+    run_setup(script, store, comfy, talk, bin_dir, home)
+
+    assert talk.said.count("Type a number from 1 to 1.") == 1
+    assert saved(store)["agent"] == "claude"
+
+
+def test_main_reports_group_readable_agent_json_as_unusable(store, machine, scripted_main):
+    script = load_script()
+    path = store.data_dir / "agent.json"
+    path.write_text(json.dumps({"agent": "codex", "folder": str(machine[2])}))
+    path.chmod(0o640)
+
+    status, talk = scripted_main(script, store)
+
+    assert status == 0
+    assert "agent.json cannot be used" in talk.said
+    assert "Agent:" not in talk.said
+
+
+def test_main_reports_deleted_folder_as_unusable(store, machine, scripted_main):
+    script = load_script()
+    gone = machine[2] / "gone"
+    path = store.data_dir / "agent.json"
+    path.write_text(json.dumps({"agent": "codex", "folder": str(gone)}))
+    path.chmod(0o600)
+
+    status, talk = scripted_main(script, store)
+
+    assert status == 0
+    assert "agent.json cannot be used" in talk.said
+
+
+def test_main_reports_relative_folder_as_unusable(store, scripted_main):
+    script = load_script()
+    path = store.data_dir / "agent.json"
+    path.write_text(json.dumps({"agent": "codex", "folder": "rel"}))
+    path.chmod(0o600)
+
+    _, talk = scripted_main(script, store)
+
+    assert "agent.json cannot be used" in talk.said
+
+
+def test_read_agent_file_refuses_a_foreign_owner(store, machine, monkeypatch):
+    script = load_script()
+    path = store.data_dir / "agent.json"
+    path.write_text(json.dumps({"agent": "codex", "folder": str(machine[2])}))
+    path.chmod(0o600)
+    real_fstat = os.fstat
+
+    def fake(fd):
+        st = real_fstat(fd)
+        if stat.S_ISREG(st.st_mode):
+            fields = list(st)
+            fields[4] += 1
+            return os.stat_result(tuple(fields))
+        return st
+
+    assert script._read_agent_file(store.data_dir) is not None
+    monkeypatch.setattr(script.os, "fstat", fake)
+
+    assert script._read_agent_file(store.data_dir) is None
+
+
+def test_find_agents_without_a_home_searches_path_only(machine):
+    script = load_script()
+    bin_dir, home, _ = machine
+    make_exe(home / ".local" / "bin", "codex")
+    on_path = make_exe(bin_dir, "claude")
+
+    assert script.find_agents(str(bin_dir), None) == [("claude", "Claude Code", str(on_path))]
+
+
+def test_main_survives_a_machine_with_no_home(store, machine, monkeypatch):
+    script = load_script()
+    make_exe(machine[0], "claude")
+
+    def no_home():
+        raise RuntimeError("no home")
+
+    monkeypatch.setattr(script.Path, "home", staticmethod(no_home))
+    talk = Talk("", "")
+
+    status = script.main(
+        [CODE, "--data-dir", str(store.data_dir)],
+        ask=talk.ask,
+        say=talk.say,
+        path=str(machine[0]),
+        terminal=True,
+    )
+
+    assert status == 0
+    assert saved(store)["agent"] == "claude"
+
+
+def test_setup_flag_with_code_and_no_terminal_prints_the_hint(store, scripted_main):
+    script = load_script()
+
+    status, talk = scripted_main(script, store, argv=[CODE, "--setup"], terminal=False)
+
+    assert status == 0
+    assert store.pair_path.exists()
+    assert talk.prompts == []
+    assert f"python3 {SCRIPT} --setup" in talk.said

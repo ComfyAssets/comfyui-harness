@@ -160,13 +160,14 @@ def _printable(text: str) -> bool:
     return len(text) <= MAX_FOLDER_ECHO and text.isprintable()
 
 
-def find_agents(path: str, home: Path) -> "list[tuple[str, str, str]]":
+def find_agents(path: str, home: Optional[Path]) -> "list[tuple[str, str, str]]":
     """Supported agents on `path`, then ~/.local/bin: (id, name, where found).
 
     Same order as harness.cli.find, so this script and the server agree.
     """
     directories = [d for d in path.split(os.pathsep) if d and os.path.isabs(d)]
-    directories.append(str(home / ".local" / "bin"))
+    if home is not None:
+        directories.append(str(home / ".local" / "bin"))
     found = []
     for agent_id, name, executable, _ in AGENTS:
         for directory in directories:
@@ -189,26 +190,43 @@ def _ask_agent(
         say(f"  Not installed: {', '.join(missing)}")
     while True:
         answer = ask("Agent [1]: ").strip() or "1"
-        if answer.isdigit() and 1 <= int(answer) <= len(found):
+        if answer.isascii() and answer.isdigit() and 1 <= int(answer) <= len(found):
             return found[int(answer) - 1]
         say(f"  Type a number from 1 to {len(found)}.")
 
 
+def _folder_problem(folder: Path) -> Optional[str]:
+    """Why the server would ignore this folder, or None when it would accept it."""
+    if not _printable(str(folder)):
+        return "That path is too long, or has characters that cannot be shown."
+    if not folder.is_absolute():
+        return "Give a full path, starting with / or ~."
+    if not folder.is_dir():
+        return f"{folder} is not a folder on this machine."
+    return None
+
+
 def _ask_folder(comfy_dir: Path, ask: Callable[[str], str], say: Callable[[str], None]) -> Path:
-    # Refuses what the server would ignore: not full, not a folder, not showable.
+    # Refuses what the server would ignore, the default included.
+    default: Optional[Path] = comfy_dir
     while True:
-        answer = ask(f"Which folder should it start in? [{comfy_dir}]: ").strip()
-        if not answer:
-            return comfy_dir
-        folder = Path(answer).expanduser()
-        if not _printable(str(folder)):
-            say("  That path is too long, or has characters that cannot be shown.")
-        elif not folder.is_absolute():
-            say("  Give a full path, starting with / or ~.")
-        elif not folder.is_dir():
-            say(f"  {folder} is not a folder on this machine.")
+        if default is not None:
+            answer = ask(f"Which folder should it start in? [{default}]: ").strip()
         else:
+            answer = ask("Which folder should it start in: ").strip()
+        if answer:
+            folder = Path(answer).expanduser()
+        elif default is not None:
+            folder = default
+        else:
+            say("  Type a folder.")
+            continue
+        problem = _folder_problem(folder)
+        if problem is None:
             return folder
+        say(f"  {problem}")
+        if folder == default:
+            default = None
 
 
 def _say_no_agent(say: Callable[[str], None]) -> None:
@@ -225,7 +243,7 @@ def _ask_and_save(
     ask: Callable[[str], str],
     say: Callable[[str], None],
     path: str,
-    home: Path,
+    home: Optional[Path],
 ) -> None:
     found = find_agents(path, home)
     if not found:
@@ -252,7 +270,7 @@ def setup(
     ask: Callable[[str], str],
     say: Callable[[str], None],
     path: str,
-    home: Path,
+    home: Optional[Path],
 ) -> int:
     """Ask which agent and folder the terminal uses and save agent.json."""
     try:
@@ -278,13 +296,16 @@ def _read_agent_file(data_dir: Path) -> "Optional[tuple[str, str]]":
     except _Refused:
         return None
     try:
+        owner = os.fstat(dir_fd).st_uid  # the key shares it (see _load_key)
         fd = os.open(AGENT_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     except OSError:
         return None
     finally:
         os.close(dir_fd)
+    expected = owner if os.geteuid() == 0 else os.geteuid()
     with os.fdopen(fd, "rb") as handle:
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+        st = os.fstat(handle.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != expected or st.st_mode & 0o077:
             return None
         raw = handle.read(MAX_AGENT_FILE_BYTES + 1)
     try:
@@ -297,7 +318,7 @@ def _read_agent_file(data_dir: Path) -> "Optional[tuple[str, str]]":
     agent, folder = value["agent"], value["folder"]
     if not isinstance(agent, str) or agent not in names:
         return None
-    if not isinstance(folder, str) or not _printable(folder):
+    if not isinstance(folder, str) or _folder_problem(Path(folder)) is not None:
         return None
     return names[agent], folder
 
@@ -322,7 +343,7 @@ def _after_pairing(
     ask: Callable[[str], str],
     say: Callable[[str], None],
     path: str,
-    home: Path,
+    home: Optional[Path],
     terminal: bool,
 ) -> int:
     if _agent_file_exists(data_dir):
@@ -358,7 +379,11 @@ def main(
     ask = input if ask is None else ask
     say = print if say is None else say
     path = os.environ.get("PATH", "") if path is None else path
-    home = Path.home() if home is None else home
+    if home is None:
+        try:
+            home = Path.home()
+        except RuntimeError:  # no HOME and no passwd entry: no ~/.local/bin
+            home = None
     terminal = sys.stdin.isatty() if terminal is None else terminal
 
     data_dir: Path = args.data_dir if args.data_dir is not None else default_data_dir()
@@ -383,8 +408,8 @@ def main(
     except OSError as exc:
         return _fail(f"Could not write the pair file in {data_dir}: {exc.strerror}.")
     say("Paired code written. Return to the browser.")
-    if args.setup:
-        return setup(data_dir, comfy_dir, ask, say, path, home) if terminal else 0
+    if args.setup and terminal:
+        return setup(data_dir, comfy_dir, ask, say, path, home)
     return _after_pairing(data_dir, comfy_dir, ask, say, path, home, terminal)
 
 
