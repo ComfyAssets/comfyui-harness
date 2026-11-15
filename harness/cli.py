@@ -141,9 +141,11 @@ def _search_path(path: Optional[str], home: Optional[Path]) -> list[str]:
     """The absolute PATH entries, then ~/.local/bin."""
     if path is None:
         path = os.environ.get("PATH", "")
-    if home is None:
-        home = Path.home()
     directories = [d for d in path.split(os.pathsep) if d and os.path.isabs(d)]
+    try:
+        home = Path.home() if home is None else home
+    except RuntimeError:  # no HOME and no passwd entry: no ~/.local/bin
+        return directories
     directories.append(str(home / ".local" / "bin"))
     return directories
 
@@ -331,8 +333,15 @@ def _is_found(cli_id: str, path: Optional[str], home: Optional[Path]) -> bool:
     return True
 
 
+def _unprompted(agent: str, home: Optional[Path]) -> Optional[bool]:
+    try:
+        return unprompted(agent, Path.home() if home is None else home)
+    except RuntimeError:  # no HOME and no passwd entry: not checked
+        return None
+
+
 def _folder_ok(choice: "AgentChoice") -> bool:
-    if choice.source == "ignored" and choice.reason.startswith("folder does not exist"):
+    if choice.folder_missing:
         return False
     return choice.folder.is_dir()
 
@@ -348,6 +357,8 @@ def status(
     An ignored choice is shown as the default agent for display only; the store
     has already put the default in `choice` and put the reason in `choice.reason`.
     """
+    from .store import MAX_FOLDER_ECHO, printable  # store imports this module
+
     cli = CLIS[choice.agent]
     found = _is_found(choice.agent, path, home)
     return {
@@ -357,11 +368,11 @@ def status(
         "agent_name": cli.name,
         "agent_found": found,
         "agent_install": cli.install,
-        "agent_folder": str(choice.folder),
+        "agent_folder": printable(str(choice.folder), MAX_FOLDER_ECHO) or "",
         "agent_folder_ok": _folder_ok(choice),
         "agent_choice": choice.source,
         "agent_choice_reason": choice.reason,
-        "agent_unprompted": unprompted(cli.id, Path.home() if home is None else home),
+        "agent_unprompted": _unprompted(cli.id, home),
         "agents_installed": [i for i in AGENT_IDS if _is_found(i, path, home)],
         "pair_script": str(Path(__file__).absolute().parent.parent / "pair.py"),
     }

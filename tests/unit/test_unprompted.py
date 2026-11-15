@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -127,3 +128,55 @@ def test_copilot_has_no_documented_setting(tmp_path):
 
 def test_unknown_agent_is_not_checked(tmp_path):
     assert unprompted("nope", tmp_path) is None
+
+
+def test_fifo_config_does_not_hang_and_is_false(tmp_path):
+    target = tmp_path / ".claude" / "settings.json"
+    target.parent.mkdir(parents=True)
+    os.mkfifo(target)
+    assert unprompted("claude", tmp_path) is False
+
+
+def test_byte_cap_counts_bytes_not_characters(tmp_path):
+    write(tmp_path, CLAUDE, '{"x": "' + "é" * (MAX_CONFIG_BYTES // 2) + '"}')
+    assert (tmp_path / ".claude" / "settings.json").stat().st_size > MAX_CONFIG_BYTES
+    assert module._read_text(tmp_path / ".claude" / "settings.json") is None
+
+
+def rules(*items):
+    return json.dumps({"permissions": list(items)})
+
+
+def rule(effect, action="*", resource="*"):
+    return {"action": action, "resource": resource, "effect": effect}
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [rule("allow")],
+        [{"action": "*", "effect": "allow"}],
+        [rule("ask"), rule("allow")],
+        [rule("deny", "bash", "rm *"), rule("allow")],
+        [rule("allow"), "junk", {"effect": "ask"}],
+    ],
+)
+def test_opencode_v2_blanket_allow_is_true(tmp_path, items):
+    write(tmp_path, OPENCODE, rules(*items))
+    assert unprompted("opencode", tmp_path) is True
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [rule("allow"), rule("ask")],
+        [rule("allow"), rule("deny")],
+        [rule("allow", "read")],
+        [rule("allow", "*", "src/*")],
+        [],
+        ["x", 3, None, {"action": 1, "resource": "*", "effect": "allow"}, {"effect": "allow"}],
+    ],
+)
+def test_opencode_v2_other_or_malformed_is_false(tmp_path, items):
+    write(tmp_path, OPENCODE, rules(*items))
+    assert unprompted("opencode", tmp_path) is False

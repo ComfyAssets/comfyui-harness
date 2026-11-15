@@ -606,3 +606,36 @@ def test_write_private_refuses_a_symlinked_data_dir(tmp_path):
         store.write_private("mcp.json", b"{}")
     assert e.value.code == "unsafe_permissions"
     assert not (real / "mcp.json").exists()
+
+
+def test_a_missing_saved_folder_sets_the_structured_flag(tmp_path):
+    r = ignored(tmp_path, {"agent": "codex", "folder": str(tmp_path / "gone")})
+    assert r.folder_missing is True
+
+
+def test_other_ignored_reasons_do_not_set_the_folder_flag(tmp_path):
+    assert ignored(tmp_path, {"agent": "pi", "folder": str(tmp_path)}).folder_missing is False
+
+
+def test_an_existing_folder_with_an_unprintable_name_is_ignored(tmp_path):
+    odd = tmp_path / "a\nb"
+    odd.mkdir()
+    r = ignored(tmp_path, {"agent": "codex", "folder": str(odd)})
+    assert r.reason == "folder path not shown: it has characters that cannot be displayed"
+    assert r.folder_missing is False
+
+
+def test_a_store_error_reason_is_capped(tmp_path):
+    store = opened(tmp_path / "d")
+    err = StoreError("bad_state", tmp_path, "x" * 1000)
+    with mock.patch.object(Store, "_read_private", side_effect=err):
+        r = store.agent_choice(tmp_path)
+    assert r.source == "ignored"
+    assert r.reason == "agent.json could not be used"
+
+
+def test_a_short_store_error_reason_is_kept(tmp_path):
+    store = opened(tmp_path / "d")
+    err = StoreError("bad_state", tmp_path, "agent.json is not private")
+    with mock.patch.object(Store, "_read_private", side_effect=err):
+        assert store.agent_choice(tmp_path).reason == "agent.json is not private"

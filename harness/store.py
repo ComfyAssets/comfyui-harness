@@ -23,6 +23,7 @@ AGENT_FILE = "agent.json"
 DEFAULT_AGENT = "claude"
 MAX_AGENT_ECHO = 40
 MAX_FOLDER_ECHO = 200
+MAX_REASON_ECHO = 300
 LOAD_ATTEMPTS = 3
 _SYMLINK_ERRNOS = (errno.ELOOP, errno.ENOTDIR, errno.EMLINK)
 
@@ -68,6 +69,7 @@ class AgentChoice:
     folder: Path
     source: str  # "saved", "default" or "ignored"
     reason: str  # empty unless ignored
+    folder_missing: bool = False  # the saved folder does not exist
 
 
 _BRIDGE_DEFAULTS = (("bridge_enabled", False), ("bridge_edits", True), ("bridge_runs", False))
@@ -179,6 +181,10 @@ def _check_plain_name(name: str) -> None:
 class _ChoiceError(ValueError):
     """agent.json holds a choice the harness will not accept."""
 
+    def __init__(self, message: str, folder_missing: bool = False) -> None:
+        super().__init__(message)
+        self.folder_missing = folder_missing
+
 
 class Store:
     def __init__(self, data_dir: Path) -> None:
@@ -245,7 +251,7 @@ class Store:
                 return self._ignored(default_folder, "agent.json could not be read")
         if data is None:
             return AgentChoice(DEFAULT_AGENT, default_folder, "default", "")
-        reason = ""
+        reason, missing = "", False
         try:
             if len(data) > MAX_STATE_BYTES:
                 raise _ChoiceError("file is too large")
@@ -253,14 +259,16 @@ class Store:
             agent, folder = self._parse_agent_choice(raw)
             return AgentChoice(agent, folder, "saved", "")
         except _ChoiceError as exc:
-            reason = str(exc)
+            reason, missing = str(exc), exc.folder_missing
         except (ValueError, OverflowError, RecursionError):
             reason = "file is not valid JSON with agent and folder"
-        return self._ignored(default_folder, reason)
+        return self._ignored(default_folder, reason, missing)
 
     @staticmethod
-    def _ignored(default_folder: Path, reason: str) -> AgentChoice:
-        return AgentChoice(DEFAULT_AGENT, default_folder, "ignored", reason)
+    def _ignored(default_folder: Path, reason: str, folder_missing: bool = False) -> AgentChoice:
+        # The one place every reason is capped and filtered before it leaves.
+        shown = printable(reason, MAX_REASON_ECHO) or "agent.json could not be used"
+        return AgentChoice(DEFAULT_AGENT, default_folder, "ignored", shown, folder_missing)
 
     @staticmethod
     def _parse_agent_choice(raw: Any) -> tuple[str, Path]:
@@ -281,10 +289,15 @@ class Store:
         if not os.path.isdir(folder):
             shown = printable(folder, MAX_FOLDER_ECHO)
             raise _ChoiceError(
-                f"folder does not exist: {shown}"
-                if shown is not None
-                else "folder does not exist (path not shown)"
+                (
+                    f"folder does not exist: {shown}"
+                    if shown is not None
+                    else "folder does not exist (path not shown)"
+                ),
+                folder_missing=True,
             )
+        if printable(folder, MAX_FOLDER_ECHO) is None:
+            raise _ChoiceError("folder path not shown: it has characters that cannot be displayed")
         return agent, Path(folder)
 
     @contextmanager

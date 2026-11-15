@@ -26,6 +26,14 @@ async def test_status_for_unpaired_caller_has_exactly_three_fields(client, prefi
     assert body == {"supported": True, "paired": False, "enabled": False}
 
 
+async def test_real_cli_status_gives_an_unpaired_caller_exactly_three_fields(client, deps):
+    from harness import cli
+
+    deps.cli_status = cli.status
+    body = await (await client.get("/harness/status")).json()
+    assert body == {"supported": True, "paired": False, "enabled": False}
+
+
 async def test_status_for_paired_caller_adds_cli_and_session(client, deps):
     headers, _ = await pair(client, deps)
     body = await (await client.get("/harness/status", headers=same_origin(headers))).json()

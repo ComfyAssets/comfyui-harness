@@ -7,6 +7,8 @@ the page must not read a missing badge as "this agent asks".
 """
 
 import json
+import os
+import stat
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -19,12 +21,30 @@ MAX_CONFIG_BYTES = 256 * 1024
 
 
 def _read_text(path: Path) -> Optional[str]:
+    """Up to MAX_CONFIG_BYTES of a regular file; never blocks on a FIFO or device."""
     try:
-        with open(path, encoding="utf-8") as handle:
-            text = handle.read(MAX_CONFIG_BYTES + 1)
-    except (OSError, ValueError):  # ValueError: not UTF-8
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
         return None
-    return text if len(text) <= MAX_CONFIG_BYTES else None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        raw = b""
+        while len(raw) <= MAX_CONFIG_BYTES:
+            chunk = os.read(fd, MAX_CONFIG_BYTES + 1 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_CONFIG_BYTES:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except ValueError:
+        return None
 
 
 def _read_json(path: Path) -> Any:
@@ -58,11 +78,30 @@ def _codex(home: Path) -> bool:
     return data.get("approval_policy") == "never"
 
 
+def _blanket_rule_allows(rules: list) -> bool:
+    # v2 format: rules combine in order, the last matching rule wins. Only a
+    # rule for every action on every resource decides the blanket answer.
+    effect = None
+    for rule in rules:
+        if not isinstance(rule, dict) or rule.get("action") != "*":
+            continue
+        if rule.get("resource", "*") != "*" or not isinstance(rule.get("effect"), str):
+            continue
+        effect = rule["effect"]
+    return effect == "allow"
+
+
 def _opencode(home: Path) -> bool:
-    # "permission": "allow", or {"*": "allow"}, in ~/.config/opencode/opencode.json.
-    # https://opencode.ai/docs/permissions/
+    # v1: "permission": "allow", or {"*": "allow"}; v2: a "permissions" array of
+    # {"action", "resource", "effect"} rules, last match wins, unmatched asks.
+    # In ~/.config/opencode/opencode.json. https://opencode.ai/docs/permissions/
     data = _read_json(home / ".config" / "opencode" / "opencode.json")
-    permission = data.get("permission") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return False
+    rules = data.get("permissions")
+    if isinstance(rules, list) and _blanket_rule_allows(rules):
+        return True
+    permission = data.get("permission")
     if isinstance(permission, dict):
         return permission.get("*") == "allow"
     return permission == "allow"

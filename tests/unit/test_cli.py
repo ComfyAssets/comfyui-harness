@@ -409,6 +409,32 @@ def test_agents_installed_lists_only_found_agents_in_table_order(tmp_path):
     assert body["agents_installed"] == ["claude", "opencode", "copilot"]
 
 
+def test_status_flags_a_folder_the_store_found_missing(tmp_path):
+    gone = AgentChoice("claude", tmp_path, "ignored", "any wording", folder_missing=True)
+    assert status(gone, **lookup(tmp_path))["agent_folder_ok"] is False
+
+
+def test_status_does_not_read_the_reason_text_for_the_folder(tmp_path):
+    odd = AgentChoice("claude", tmp_path, "ignored", "folder does not exist: x")
+    assert status(odd, **lookup(tmp_path))["agent_folder_ok"] is True
+
+
+def test_status_shows_only_a_printable_folder(tmp_path):
+    odd = choice_of(folder=tmp_path / "a\nb")
+    assert status(odd, **lookup(tmp_path))["agent_folder"] == ""
+    assert status(choice_of(folder=tmp_path), **lookup(tmp_path))["agent_folder"] == str(tmp_path)
+
+
+def test_status_treats_no_home_as_not_checked(tmp_path, monkeypatch):
+    def broken():
+        raise RuntimeError("no home")
+
+    monkeypatch.setattr(Path, "home", staticmethod(broken))
+    make_exe(tmp_path / "pathbin" / "claude")
+    body = status(choice_of(folder=tmp_path), str(tmp_path / "pathbin"), None, "/nowhere/python")
+    assert body["agent_unprompted"] is None
+
+
 def test_status_flags_a_missing_folder(tmp_path):
     body = status(choice_of(folder=tmp_path / "gone"), **lookup(tmp_path))
     assert body["agent_folder_ok"] is False
@@ -426,7 +452,9 @@ def test_ignored_choice_reports_the_reason_and_the_default_agent(tmp_path):
 
 
 def test_ignored_for_a_missing_folder_is_not_folder_ok(tmp_path):
-    ignored = choice_of("claude", tmp_path, "ignored", "folder does not exist: /gone")
+    ignored = AgentChoice(
+        "claude", tmp_path, "ignored", "folder does not exist: /gone", folder_missing=True
+    )
     body = status(ignored, **lookup(tmp_path))
     assert body["agent_folder_ok"] is False
 
