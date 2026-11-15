@@ -1,0 +1,24 @@
+# Left out of the Comfy Registry package (comfy node publish). Git clones still have
+# everything. tests/unit/test_package_contents.py holds these rules to what ComfyUI
+# needs at run time; keep each one anchored to the root with a leading /.
+
+# Development folders
+/tests/
+/tools/
+/.github/
+/docs/superpowers/
+/docs/manual-checks.md
+
+# Development files
+/Makefile
+/mypy.ini
+/pytest.ini
+/.flake8
+/.pre-commit-config.yaml
+/.gitignore
+/.comfyignore
+/requirements-dev.txt
+/TESTING.md
+/concepts_brief.md
+/CLAUDE.md
+/AGENTS.md
