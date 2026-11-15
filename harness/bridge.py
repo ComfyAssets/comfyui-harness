@@ -488,11 +488,18 @@ class Bridge:
         self._waiting[rid] = (sink, future)
         try:
             sink.send_json({"type": "bridge", "rid": rid, "cmd": name, "args": dict(args)})
-            return await asyncio.wait_for(future, self._timeout)
-        except asyncio.TimeoutError:
-            raise ToolError(UNKNOWN) from None
+            # Not asyncio.wait_for: before Python 3.12 it returns the reply's outcome
+            # instead of CancelledError when the caller is cancelled in the same tick as
+            # the reply lands, so a cancelled call would go on. asyncio.wait never
+            # swallows the caller's cancellation.
+            done, _ = await asyncio.wait({future}, timeout=self._timeout)
+            if not done:
+                raise ToolError(UNKNOWN)
+            return future.result()
         finally:
             self._waiting.pop(rid, None)
+            if not future.done():
+                future.cancel()
 
 
 _OUTCOMES = {
