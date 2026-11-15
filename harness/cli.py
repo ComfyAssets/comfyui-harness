@@ -100,9 +100,13 @@ def find_mcp_server(
     return None
 
 
-def find_playwriter(path: Optional[str] = None, home: Optional[Path] = None) -> Optional[Path]:
-    """playwriter on PATH, then ~/.local/bin (npm's global bin when its prefix is ~/.local)."""
-    for directory in _search_path(path, home):
+def find_playwriter(path: Optional[str] = None) -> Optional[Path]:
+    """playwriter on PATH only: the agent runs it by name with the server's PATH, so a
+    copy elsewhere (no ~/.local/bin fallback, unlike claude and comfy-mcp, which are
+    written as absolute paths) would read as found and then fail."""
+    if path is None:
+        path = os.environ.get("PATH", "")
+    for directory in (d for d in path.split(os.pathsep) if d and os.path.isabs(d)):
         candidate = Path(directory) / PLAYWRITER
         if _is_runnable(candidate):
             return candidate
@@ -265,5 +269,5 @@ def status(
     return {
         "cli_found": cli_found,
         "mcp_found": find_mcp_server(python, path, home) is not None,
-        "playwriter_found": find_playwriter(path, home) is not None,
+        "playwriter_found": find_playwriter(path) is not None,
     }

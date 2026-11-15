@@ -26,12 +26,15 @@ graph change made through Playwriter has no undo grouping and no checks.
 ### On the ComfyUI machine
 
 1. Install the CLI: `npm i -g playwriter`.
-2. Check that ComfyUI can see it. The harness and the agent use the PATH
-   ComfyUI was started with, plus `~/.local/bin`. If Settings says "not
-   found" although `playwriter` works in your shell, the command (or the
-   `node` it needs) is somewhere ComfyUI's PATH does not include, which is
-   common with nvm or a custom npm prefix. Add that directory to the PATH
-   of the shell or service that starts ComfyUI, then restart ComfyUI.
+2. Check that ComfyUI can see it. The agent runs `playwriter` by name with
+   the PATH ComfyUI was started with, so Settings says "found" only when the
+   command is on that PATH. If it says "not found" although `playwriter`
+   works in your shell, npm's global folder is not on ComfyUI's PATH, which
+   is common with nvm or a custom npm prefix (`npm config get prefix` shows
+   it; the command is in its `bin`). Add that directory to the PATH of the
+   shell or service that starts ComfyUI, then restart ComfyUI. The command
+   is a Node script, so `node` must be on that PATH too; Settings does not
+   check that, and a missing `node` shows up as the agent's command failing.
 
 Playwriter's own instructions also suggest `npx skills add … -g`. Skip it:
 it writes to your global Claude configuration. The agent reads the same
@@ -56,9 +59,15 @@ instructions from playwriter.dev when it connects.
    sits over the panel's header.
 2. Click **Remote control**, then **Share** in the confirmation. Playwriter
    copies a prompt that contains a secret id.
-3. Paste it into the harness terminal. The agent runs
-   `playwriter session new --remote <id>`, reads Playwriter's instructions
-   and reports the tab it can see.
+3. Paste it into the harness terminal. The prompt tells the agent to run
+   `npx -y playwriter@latest session new --remote <id>`, read Playwriter's
+   instructions and report the tab it can see.
+
+The copied prompt uses `npx -y playwriter@latest`, which downloads and runs
+the newest Playwriter from npm each time, not the copy you installed. To
+use the version you installed (the one Settings reports), add a line to the
+prompt before you send it: "Use the installed `playwriter` command instead
+of npx."
 
 The id travels only in what you paste. The harness never stores, logs or
 forwards it. It does stay in the terminal's scrollback and in the
@@ -66,13 +75,14 @@ conversation the agent sends to its model, so stop sharing when you are done.
 
 ## Stop
 
-Any of these ends access at once, and the id never works again:
+- **Remote ON › Stop sharing** in Playwriter's toolbar. Tried: the agent's
+  next command found the tunnel gone and could not reconnect.
+- Playwriter's own docs say these end sharing too: **Cancel** on Chrome's
+  "started debugging this browser" bar, closing the tab where you started
+  sharing, or closing Chrome.
 
-- **Remote ON › Stop sharing** in Playwriter's toolbar.
-- **Cancel** on Chrome's "started debugging this browser" bar.
-- Closing the tab where you started sharing, or closing Chrome.
-
-To use it again, share again and paste the new prompt.
+Playwriter says an id is never reused once sharing ends. To use it again,
+share again and paste the new prompt.
 
 ## What sharing gives away
 
@@ -92,9 +102,13 @@ password: never paste it into an issue, a chat or a screenshot you share.
 ## Things to know
 
 - **Permission prompts.** Each Playwriter action is a shell command the
-  agent runs. In Claude Code's default mode you are asked before each one;
-  in auto mode they run without asking. That is the only brake on what the
-  agent does in your browser.
+  agent runs. Claude Code asks before each one unless your permission rules
+  allow it or you are in auto mode, where they run without asking (as in
+  the try this guide is based on). Those settings are the only brake on what
+  the agent does in your browser.
+- **Unpinned code.** The Share prompt's `npx -y playwriter@latest` fetches
+  and runs whatever version is newest on npm at that moment. See "Connect
+  the agent" to use your installed copy instead.
 - **The terminal is in the same tab.** The harness terminal lives inside
   the ComfyUI page. Key presses the agent sends to the page land in the
   terminal while it has focus, and become the agent's own input. Ask the

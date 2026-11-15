@@ -41,9 +41,11 @@ nothing in the harness when they do not.
 ## Constraints
 
 - No new runtime dependency, no new process, no new port.
-- Detection follows `find_mcp_server` in `harness/cli.py`: the session's
-  PATH, then `~/.local/bin`. The agent's environment is the server's, so a
-  CLI the harness finds is one the agent can run.
+- Detection searches the session's PATH only. The agent runs `playwriter`
+  by name with the server's environment, so a CLI the harness finds is one
+  the agent can run. (Changed after the final review: the first build also
+  looked in `~/.local/bin` like `find_mcp_server`, which suits `claude` and
+  `comfy-mcp`, written as absolute paths, but not a command run by name.)
 - Settings rows are built with `createElement`/`textContent` only.
 
 ## Approaches

@@ -341,23 +341,26 @@ def test_status_reports_cli_and_mcp(tmp_path):
 
 def test_find_playwriter_on_path(tmp_path):
     exe = make_exe(tmp_path / "pathbin" / "playwriter")
-    assert find_playwriter(str(tmp_path / "pathbin"), tmp_path / "home") == exe
+    assert find_playwriter(str(tmp_path / "pathbin")) == exe
 
 
-def test_find_playwriter_in_local_bin(tmp_path):
-    # Where `npm i -g` puts it when npm's prefix is ~/.local.
-    exe = make_exe(tmp_path / "home" / ".local" / "bin" / "playwriter")
-    assert find_playwriter(str(tmp_path / "none"), tmp_path / "home") == exe
+def test_find_playwriter_needs_it_on_path(tmp_path, monkeypatch):
+    # The agent runs `playwriter` by name with ComfyUI's PATH, so a copy only in
+    # ~/.local/bin (npm's global bin when its prefix is ~/.local) is not usable.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    make_exe(tmp_path / "home" / ".local" / "bin" / "playwriter")
+    assert find_playwriter(str(tmp_path / "none")) is None
+    assert status(str(tmp_path / "none"), tmp_path / "home")["playwriter_found"] is False
 
 
 def test_find_playwriter_skips_what_cannot_run(tmp_path):
     (tmp_path / "pathbin" / "playwriter").mkdir(parents=True)  # a directory
-    dangling = tmp_path / "home" / ".local" / "bin" / "playwriter"
+    dangling = tmp_path / "links" / "playwriter"
     dangling.parent.mkdir(parents=True)
     dangling.symlink_to(tmp_path / "gone")  # an npm link left by an uninstall
     make_exe(tmp_path / "other" / "playwriter", mode=0o644)  # no exec bit
-    path = os.pathsep.join([str(tmp_path / "pathbin"), str(tmp_path / "other")])
-    assert find_playwriter(path, tmp_path / "home") is None
+    path = os.pathsep.join(str(tmp_path / d) for d in ("pathbin", "links", "other"))
+    assert find_playwriter(path) is None
 
 
 def test_find_playwriter_does_not_look_beside_the_server_python(tmp_path):
