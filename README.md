@@ -93,6 +93,8 @@ Pairing is refused unless the page is served over HTTPS or from a loopback addre
 
 `user/` must be a persistent volume. It holds the machine key and the list of paired browsers; without a volume you pair again after every container rebuild.
 
+`docker exec` runs `pair.py` as the container's default user, often root, unless you pass `-u`. Run as root, `pair.py` checks the folder as root, so it accepts a folder only root can reach (one under `/root`, say) even when ComfyUI runs as another user. ComfyUI then ignores the choice at start with "folder does not exist", and the panel asks you to run `--setup` again. Pick a folder the ComfyUI user can reach, or run `pair.py` as that user (`docker exec -it -u <user>`).
+
 ### Where `comfy-mcp` is found
 
 The harness looks for `comfy-mcp` next to the Python that runs ComfyUI first (so installing it into ComfyUI's venv works even when the venv is not activated, as under systemd), then on the server's `PATH`, then in `~/.local/bin`. The agent reaches ComfyUI at the address ComfyUI listens on (loopback when it listens on all addresses), over HTTPS when ComfyUI was started with `--tls-keyfile`.
