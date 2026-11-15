@@ -766,3 +766,57 @@ test("run is refused as busy while ComfyUI is already queueing", async () => {
   comfy.processingQueue = true;
   await assert.rejects(host.run(), (err) => err.code === "busy");
 });
+
+// ------------------------------------------------------- the real host's restore
+
+// A stand-in for the 1.59.1 ChangeTracker: states are plain objects; undo pops
+// the newest undo entry, pushes the current state onto redo and loads it.
+class FakeTracker {
+  constructor(undoQueue, activeState) {
+    this.undoQueue = undoQueue;
+    this.redoQueue = [];
+    this.activeState = activeState;
+    this.changeCount = 0;
+  }
+  static graphEqual(a, b) {
+    return JSON.stringify(a) === JSON.stringify(b);
+  }
+  async undo() {
+    const previous = this.undoQueue.pop();
+    if (!previous) return;
+    this.redoQueue.push(this.activeState);
+    this.activeState = previous;
+  }
+}
+
+function restoreApp(tracker) {
+  const root = fakeGraph();
+  const comfy = {
+    rootGraph: root,
+    canvas: { graph: root, setDirty() {} },
+    extensionManager: { workflow: { activeWorkflow: { changeTracker: tracker } } },
+  };
+  return createComfyHost(comfy, {});
+}
+
+test("restore after a batch that recorded nothing leaves the undo history as it was", async () => {
+  const author = { nodes: [1] };
+  const before = { nodes: [1, 2] };
+  const tracker = new FakeTracker([author], before);
+  await restoreApp(tracker).restore({ nodes: [1, 2] });
+  assert.deepEqual(tracker.undoQueue, [author]);
+  assert.deepEqual(tracker.activeState, before);
+  assert.deepEqual(tracker.redoQueue, []);
+});
+
+test("restore after a batch that recorded its own step drops that step too", async () => {
+  // The batch's undo failed: its recorded step (the state before the batch)
+  // is the newest undo entry and the half-done graph is current.
+  const author = { nodes: [1] };
+  const before = { nodes: [1, 2] };
+  const tracker = new FakeTracker([author, before], { nodes: [1, 2, 3] });
+  await restoreApp(tracker).restore({ nodes: [1, 2] });
+  assert.equal(tracker.undoQueue.at(-1), author, "the next Ctrl+Z undoes the author's own last step");
+  assert.deepEqual(tracker.activeState, before);
+  assert.deepEqual(tracker.redoQueue, []);
+});

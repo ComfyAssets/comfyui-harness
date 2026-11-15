@@ -101,6 +101,12 @@ export function createComfyHost(comfy, win) {
       throw new Error("the canvas could not be restored");
     }
     if (t.redoQueue.length > redoLength) t.redoQueue.pop();
+    // When the batch had recorded its own step (its undo then failed), that
+    // step is the state before the batch, the same as the copy, and is now
+    // the newest undo entry: drop it too, or the next Ctrl+Z changes nothing.
+    // The tracker never records two equal states in a row otherwise.
+    const top = t.undoQueue.at(-1);
+    if (top && t.constructor?.graphEqual?.(top, copy)) t.undoQueue.pop();
     redraw();
   }
 
