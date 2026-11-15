@@ -10,6 +10,7 @@ dependencies = []
 [tool.comfy]
 PublisherId = "kiko9"
 DisplayName = "ComfyUI Harness"
+Icon = "https://raw.githubusercontent.com/ComfyAssets/comfyui-harness/main/docs/brand/icon-256.png"
 
 [tool.black]
 line-length = 100
