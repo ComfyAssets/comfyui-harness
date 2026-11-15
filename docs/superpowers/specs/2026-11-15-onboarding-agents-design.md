@@ -1,6 +1,6 @@
 # Onboarding and agent choice: design
 
-Status: draft for the author's review (builder check done).
+Status: approved by the author, 2026-11-15.
 
 ## Intent
 
