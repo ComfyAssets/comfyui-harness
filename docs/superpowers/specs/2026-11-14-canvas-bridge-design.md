@@ -203,8 +203,12 @@ the session's agent only if all of these hold:
 
 Anything else gets HTTP 403 with the existing refusal body, a new code
 `bridge_refused`, and no detail about which check failed. It is 403 and never
-401, so the CLI does not start an OAuth sign-in. Refusals are rate logged
-like the others, without header values.
+401, so the CLI does not start an OAuth sign-in. Each refusal is logged at
+INFO as `bridge_refused: <check>`, at most once per check a minute, naming the
+check that failed: `browser_header:Origin`, `browser_header:Cookie`,
+`browser_header:Sec-Fetch-Site`, `no_bearer`, `bad_bearer`,
+`secret_mismatch` or `no_bridge`. Header names only, never header values or
+the secret; the HTTP body still names no check.
 
 A caller that passes is the session's agent, and from there every answer is a
 proper MCP answer. `initialize`, `ping` and `tools/list` always work. A
@@ -214,8 +218,11 @@ off, so the agent can tell the author instead of seeing a broken connection.
 
 The secret is 32 random bytes, hex. It is made when a session starts **and
 the bridge is enabled at that moment**, and kept only in memory and in that
-session's `mcp.json`. It is cleared when the session ends **and when the
-bridge is switched off**. So a secret from an old session opens nothing, and
+session's `mcp.json`. The in-memory secret is cleared when the session ends
+**and when the bridge is switched off**. The copy in the session's
+`mcp.json` stays there until the next session start rewrites the file, but
+it opens nothing: only the in-memory secret is compared. So a secret from an
+old session opens nothing, and
 switching the bridge off and on again does not bring an old session's bridge
 back: the session has to be started again under the new consent. The agent
 can read its own secret; that is accepted, since access is not enforced
@@ -268,11 +275,20 @@ synchronously on revoke and disable.
 - When no page holds the session (the page was closed and the session is
   detached), tools fail with "No ComfyUI page is attached to this session.
   Open ComfyUI and the terminal, then try again."
-- Reply size limit 256 KiB. Today `harness/terminal.py` closes the socket on
-  any text frame over 4096 bytes (`MAX_TEXT_FRAME`). The limit becomes per
-  message type: 256 KiB for `bridge_reply`, unchanged for everything else,
-  decided before the frame is parsed as JSON by more than its type. The
-  terminal spec's WebSocket message table gains `bridge` and `bridge_reply`.
+- Reply size limit 256 KiB. Every text frame but a `bridge_reply` stays
+  limited to 4096 bytes (`MAX_TEXT_FRAME`). A text frame over 256 KiB closes
+  the socket with 1009, unparsed. A text frame over 4096 bytes is parsed only
+  while the bridge has a call waiting on that socket; otherwise it is dropped
+  unparsed and the socket stays open, so a paired bystander cannot force
+  large parses and a reply that arrives after its call timed out does not end
+  the terminal. A parsed frame over 4096 bytes that is not JSON, or whose type
+  is not `bridge_reply`, closes the socket with 1009. The terminal spec's
+  WebSocket message table gains `bridge` and `bridge_reply`.
+- A bridge frame goes only to a holder that may still use the socket: one
+  that is muted (revoked or disabled, before its socket closes), closing, or
+  whose browser no longer passes the socket's own admission check (revoked
+  or expired pairing) counts as no page attached, and an unpaired holder is
+  shut the usual way. The check and the send happen with no await between.
 - Page replies are untrusted input: parsed, checked against the expected
   shape for the command, and passed on as data.
 
@@ -361,7 +377,10 @@ it is ready to test instead of running it yourself.
   can see when the run is done and then look at the result.
 - The panel's notice line says "Claude queued a run" with a **Cancel**
   button that removes that prompt from the queue, or interrupts it if it has
-  started.
+  started. The notice goes once the run is over: it is re-checked like the
+  Undo notice, and "idle" counts as over once the run was seen queued or
+  running, or from the first timed check on. Cancel on a finished run does
+  nothing and says nothing.
 - A run cannot be undone: it uses the GPU and writes output files. That is
   why it has its own tool, its own switch and its own notice.
 
@@ -466,6 +485,8 @@ agent reads again.
 | Bridge or terminal switched off while the session runs | `tools/call` returns `isError` saying the owner turned it off. Switching the bridge off also clears the secret, so the next request is refused with 403 |
 | No page attached | "No ComfyUI page is attached to this session…" |
 | Page takes longer than 20 s, or the socket closes mid-call | "The page did not answer. The outcome is unknown: read the canvas again before doing anything else." |
+| A call still queued behind another when the bridge is switched off | The owner turned it off (nothing reached the page) |
+| A call still queued behind another when the session ends or restarts | "The session ended before this call was sent." |
 | Another page takes over the session mid-call | Same as a closed socket; the next call goes to the new page |
 | The browser holding the session is revoked mid-call | Waiting calls fail at once (synchronously with the mute). If it was the last paired browser the session stops, as today. If another browser is still paired the session lives on, as today, and tools answer "No ComfyUI page is attached" until a paired page takes the session over |
 | Terminal disabled mid-call | Waiting calls fail at once (synchronously with the mute); the session stops, as today |
@@ -491,7 +512,8 @@ agent reads again.
   It takes effect for sessions started afterwards (the CLI reads its MCP
   config at start); the settings row says so, and offers "Start again", which
   is the existing stop followed by start-and-continue, so the conversation is
-  kept. Turning it off takes effect at once and clears the session's secret.
+  kept. Turning it off takes effect at once and clears the session's secret;
+  calls in flight fail.
 - **Allow edits** (server state, `bridge_edits`, default on). Changed only
   by a paired browser, next to the bridge switch. When off, the server
   refuses `edit` before anything reaches the page, and reads still work.
@@ -507,7 +529,11 @@ agent reads again.
   tool's description that the agent follows; code cannot prove what was said
   in the conversation, and the row says so. An owner who wants a hard stop
   keeps the switch off, or sets their own Claude Code permissions to ask
-  before `run`.
+  before `run`. The row says: "Asking first is an instruction to the agent,
+  not a check. Keep this off for a hard stop."
+- Turning Allow edits or Allow runs off refuses the next call; it does not
+  stop a call already sent to the page. Turning the bridge off fails calls
+  in flight.
 - All three switches are consent **for the server**, given by its owner, not per
   browser. With two paired browsers, either can hold the session and its
   bridge, exactly as either can hold the terminal today. Like every switch
@@ -643,6 +669,9 @@ approved continuing with them.
   whole (6.5).
 - The Undo notice is re-checked on the tracker's `graphChanged` event, on
   every bridge command and once a second while it is shown.
+- The page runs bridge commands one at a time, so a command never starts
+  while an earlier edit's rollback is still awaiting undo or restore (the
+  server stops waiting on a timeout and sends the next call).
 - The graph shown is the canvas's graph (root, or the opened subgraph).
   Node ids are strings. A workflow's stable identity for the fingerprint is
   its tab's instance id, which unsaved workflows also have.
@@ -676,8 +705,8 @@ Found when the tests first ran in a real ComfyUI (Task 13), and fixed:
   next Ctrl+Z is not an empty step.
 - Verified in the real page: one Ctrl+Z removes a whole batch; a `Note` can
   be added and its text set; widget writes go through `widget.setValue`;
-  `node.pos` assignment sticks; an author change fires `graphChanged` and
-  clears the Undo notice; rollback by undo and by restore with a full
+  `node.pos` assignment sticks; an author change fires `graphChanged`, on
+  which (and on the 1 s timer) the Undo notice is re-checked and goes; rollback by undo and by restore with a full
   50-entry history and inside an open subgraph (a subgraph can be built
   without models); a tiny CPU run returns a prompt id and `get_outputs` then
   gives a file that exists.

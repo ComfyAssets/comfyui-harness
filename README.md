@@ -119,7 +119,7 @@ How the edits behave:
 2. A dialog lists what the agent can then do. Press **Turn on**.
 3. Press **Start again** in the same place. The agent reads its MCP settings when it starts, so the bridge reaches a session started after it was turned on. Start again stops the session and starts it with "continue", so the conversation is kept.
 
-Turning **Canvas bridge** off takes effect at once: the session's bridge secret is cleared and the next call is refused.
+Turning **Canvas bridge** off takes effect at once: the session's bridge secret is cleared, calls in flight fail and the next call is refused. Turning **Allow edits** or **Allow runs** off refuses the next `edit` or `run`; it does not stop a call already sent to the page.
 
 ### The three switches
 
@@ -129,7 +129,7 @@ Turning **Canvas bridge** off takes effect at once: the session's bridge secret 
 | Allow edits | on | `edit` is refused before it reaches the page. Reading still works: this is the read-only profile. |
 | Allow runs | off | `run` is refused. Run is separate from edits and needs its own switch, because a run uses your GPU, writes output files and cannot be undone. |
 
-With **Allow runs** on, the agent is told to press Run only when you ask for it. That is an instruction the agent follows, not something the code can check; to make it a hard stop, keep the switch off or set your Claude Code permissions to ask before `run`. A run queues the open workflow once, exactly as the Run button does, shows "Claude queued a run" with a **Cancel** button, and is refused while a subgraph is open (close the subgraph, or press Run yourself). Afterwards the agent can call `get_outputs` to get the output files' paths on the ComfyUI machine and open them.
+With **Allow runs** on, the agent is told to press Run only when you ask for it. That is an instruction the agent follows, not something the code can check (the settings row says so); to make it a hard stop, keep the switch off or set your Claude Code permissions to ask before `run`. A run queues the open workflow once, exactly as the Run button does, shows "Claude queued a run" with a **Cancel** button until the run is over, and is refused while a subgraph is open (close the subgraph, or press Run yourself). Afterwards the agent can call `get_outputs` to get the output files' paths on the ComfyUI machine and open them.
 
 The switches are settings the harness honours, not limits on the agent: it runs as your account and can read workflows and output files from disk with or without the bridge. Text inside a workflow (notes, titles, prompts) is read by the agent and can steer it; be careful with workflows from other people. See [SECURITY.md](SECURITY.md).
 
@@ -158,7 +158,7 @@ One session per server. A page that attaches takes the session from the page tha
 | `unsafe_permissions` (500) | `user/__harness`, `key` or `state.json` is open to other accounts, owned by someone else or a symlink. | `chmod 700 user/__harness; chmod 600 user/__harness/key user/__harness/state.json`, and check the owner. |
 | `bad_state` (500) | `state.json` or `key` is unreadable or from a newer version. | Move `user/__harness/state.json` (and `key` if it is the problem) aside and restart. Pairings are lost; nothing else. |
 | `not_found` (404) | Revoking a browser that is already gone. | Reload the settings. |
-| `bridge_refused` (403) on `/harness/mcp` | A call to the canvas bridge that is not from the current session's agent: no or an old secret, a browser header, or the bridge switched off. | Turn the bridge on and press "Start again"; the agent's old secret does not come back. |
+| `bridge_refused` (403) on `/harness/mcp` | A call to the canvas bridge that is not from the current session's agent: no or an old secret, a browser header, or the bridge switched off. ComfyUI's log names the failed check, as `bridge_refused: secret_mismatch` for example. | Turn the bridge on and press "Start again"; the agent's old secret does not come back. |
 | `bad_request` (400) | A malformed request. | Reload the page. |
 | "Claude Code not found" in the panel | Same as `cli_not_found`. | As above. |
 | "comfy-mcp not found" in settings | Not installed where the server can find it. | `pip install comfy-mcp` in the server's environment. |

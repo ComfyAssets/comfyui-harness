@@ -471,8 +471,11 @@ Binary frames are terminal bytes. Text frames are JSON. Heartbeat every 25 s.
 | page to server, canvas bridge | `{type:"bridge_reply", rid, ok: true, result}` or `{type:"bridge_reply", rid, ok: false, error: {code, message}}`; accepted only on the socket the request went to, for a waiting `rid`, once |
 
 Text frames are limited per message type: 256 KiB for `bridge_reply`, 4096
-bytes for every other type. A frame over 4096 bytes is parsed only far enough
-to read its type, and the socket is closed unless it is a `bridge_reply`.
+bytes for every other type. A frame over 256 KiB closes the socket with 1009,
+unparsed. A frame over 4096 bytes is parsed only while the canvas bridge has a
+call waiting on that socket; otherwise it is dropped unparsed and the socket
+stays open. A parsed frame over 4096 bytes that is not a `bridge_reply`
+closes the socket with 1009.
 
 `detached.reason` is one of `taken_over`, `revoked`, `disabled`, `idle`,
 `limit`, `stop` (the page asked to end the session). `boot` changes on every server start; a page that sees a new value
