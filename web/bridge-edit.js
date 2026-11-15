@@ -108,7 +108,9 @@ function liveWidgets(node) {
     }));
 }
 
-const DEF_WIDGET_KINDS = { INT: "number", FLOAT: "number", STRING: "text", BOOLEAN: "toggle", COMBO: "combo" };
+// COLOR is a widget the page reports as "color", with no value check.
+const DEF_WIDGET_KINDS = { INT: "number", FLOAT: "number", STRING: "text", BOOLEAN: "toggle", COMBO: "combo", COLOR: "other" };
+const DYNAMIC_COMBO = "COMFY_DYNAMICCOMBO_V3";
 
 function defWidget(input) {
   const kind = Array.isArray(input.options) ? "combo" : DEF_WIDGET_KINDS[input.type];
@@ -120,6 +122,50 @@ function defWidget(input) {
     max: input.max,
     values: Array.isArray(input.options) ? input.options : null,
   };
+}
+
+// A dynamic combo's option inputs keep ComfyUI's raw form: [TYPE, opts], or
+// [[values], opts] for a plain combo.
+function rawWidget(name, spec) {
+  if (!Array.isArray(spec)) return null;
+  const [type, opts] = spec;
+  if (Array.isArray(type)) return { name, kind: "combo", values: type };
+  const kind = DEF_WIDGET_KINDS[type];
+  if (!kind) return null;
+  const values = type === "COMBO" && Array.isArray(opts?.options) ? opts.options : null;
+  return { name, kind, min: opts?.min, max: opts?.max, values };
+}
+
+function optionKeys(input) {
+  return (Array.isArray(input.options) ? input.options : []).map((o) => o?.key).filter((k) => typeof k === "string");
+}
+
+function defaultKey(input) {
+  const keys = optionKeys(input);
+  return keys.includes(input.default) ? input.default : keys[0];
+}
+
+// A dynamic combo as the page builds it: the combo of option keys, then the
+// chosen option's inputs as widgets named "<combo>.<input>".
+function dynamicWidgets(input, key) {
+  const option = (Array.isArray(input.options) ? input.options : []).find((o) => o?.key === key);
+  const specs = { ...option?.inputs?.required, ...option?.inputs?.optional };
+  const subs = Object.entries(specs).map(([name, spec]) => rawWidget(`${input.name}.${name}`, spec));
+  return [{ name: input.name, kind: "combo", values: optionKeys(input) }, ...subs.filter(Boolean)];
+}
+
+function defWidgets(inputs) {
+  return inputs.flatMap((i) => (i?.type === DYNAMIC_COMBO ? dynamicWidgets(i, defaultKey(i)) : [defWidget(i)].filter(Boolean)));
+}
+
+// The widgets after a dynamic combo is switched: its old option's widgets give
+// way to the new option's, in the combo's place.
+function switchedWidgets(widgets, input, key) {
+  const at = widgets.findIndex((w) => w.name === input.name);
+  const prefix = `${input.name}.`;
+  const kept = widgets.filter((w) => w.name !== input.name && !w.name.startsWith(prefix));
+  const place = at < 0 ? kept.length : widgets.slice(0, at).filter((w) => !w.name.startsWith(prefix)).length;
+  return [...kept.slice(0, place), ...dynamicWidgets(input, key), ...kept.slice(place)];
 }
 
 function shown(value) {
@@ -212,6 +258,41 @@ class Planner {
     });
     this.steps = [];
     this.adds = new Map(); // ref -> add step, for placement sources
+    // node key -> Map(dynamic combo name -> { key, n }): combos switched earlier in the batch.
+    this.switches = new Map();
+  }
+
+  // Refs and live ids are kept apart, so a ref spelled "#5" is not node 5.
+  static nodeKey(t) {
+    return t.ref !== undefined ? `ref:${t.ref}` : `id:${t.id}`;
+  }
+
+  // A node's widgets with the dynamic combos switched earlier in the batch.
+  withSwitches(t) {
+    const switched = this.switches.get(Planner.nodeKey(t));
+    if (!switched) return t;
+    const def = lookupType(this.types, t.type);
+    let widgets = t.widgets;
+    for (const [name, { key }] of switched) widgets = switchedWidgets(widgets, def.inputs[name], key);
+    return { ...t, widgets };
+  }
+
+  // A switch rebuilds the node's inputs as well as its widgets, and the page
+  // orders them its own way, so they cannot be checked until they exist.
+  inputsSettled(t) {
+    const switched = this.switches.get(Planner.nodeKey(t));
+    if (!switched) return;
+    const [name, { n }] = switched.entries().next().value;
+    this.fail(
+      `${t.label}'s inputs change when ${JSON.stringify(name)} is switched by op ${n}. ` +
+        "Wire its inputs in a separate edit, after reading the node again.",
+    );
+  }
+
+  // The dynamic combo a set_widget names, or null for any other widget.
+  dynamicInput(t, name) {
+    const input = lookupType(this.types, t.type)?.inputs?.[name];
+    return input?.type === DYNAMIC_COMBO ? input : null;
   }
 
   fail(text) {
@@ -227,14 +308,14 @@ class Planner {
         this.fail(`new node "${key}" is removed by op ${this.removedRefs.get(key)} earlier in this batch.`);
       }
       const made = this.refs.get(key);
-      return { ref: key, label: `new node "${key}"`, type: made.type, ...this.shapeFromDef(made.def) };
+      return this.withSwitches({ ref: key, label: `new node "${key}"`, type: made.type, ...this.shapeFromDef(made.def) });
     }
     const node = findNode(this.graph, key);
     if (node) {
       if (this.removedIds.has(key)) {
         this.fail(`node #${key} is removed by op ${this.removedIds.get(key)} earlier in this batch.`);
       }
-      return {
+      return this.withSwitches({
         id: String(node.id),
         label: `node #${node.id}`,
         type: node.type,
@@ -242,7 +323,7 @@ class Planner {
         widgets: liveWidgets(node),
         inputs: slotsOf(node.inputs),
         outputs: slotsOf(node.outputs),
-      };
+      });
     }
     const later = this.refMadeAt.get(key);
     if (later !== undefined && later > this.n) {
@@ -254,7 +335,7 @@ class Planner {
   shapeFromDef(def) {
     const inputs = Object.values(def?.inputs ?? {});
     return {
-      widgets: inputs.map(defWidget).filter(Boolean),
+      widgets: defWidgets(inputs),
       inputs: slotsOf(inputs),
       outputs: slotsOf(def?.outputs),
     };
@@ -335,12 +416,18 @@ class Planner {
     }
     const problem = valueProblem(widget, op.value);
     if (problem) this.fail(`widget "${widget.name}" of ${t.label} takes ${problem}.`);
+    const dynamic = this.dynamicInput(t, widget.name);
+    if (dynamic && optionKeys(dynamic).includes(op.value)) {
+      const key = Planner.nodeKey(t);
+      this.switches.set(key, new Map([...(this.switches.get(key) ?? []), [widget.name, { key: op.value, n: this.n }]]));
+    }
     return { node: t, widget: widget.name, value: op.value };
   }
 
   connect(op) {
     const from = this.editable(op.from, "from");
     const to = this.editable(op.to, "to");
+    this.inputsSettled(to);
     const out = this.slot(from, op.output, "output");
     const inp = this.slot(to, op.input, "input");
     if (!typesMatch(out.type, inp.type)) {
@@ -357,6 +444,7 @@ class Planner {
 
   disconnect(op) {
     const t = this.editable(op.node);
+    this.inputsSettled(t);
     return { node: t, inp: this.slot(t, op.input, "input") };
   }
 
