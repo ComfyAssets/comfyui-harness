@@ -1,7 +1,7 @@
 // Shared helpers for the browser specs: the fake CLI's log, pairing, screen text,
 // and the canvas bridge's MCP endpoint as the session's agent calls it.
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect } from "./playwright.mjs";
 
@@ -66,6 +66,52 @@ export async function openPaired(page, dataDir) {
   await pairThroughPopup(page, dataDir);
   await expect(panelOf(page)).toBeVisible();
   await expect.poll(() => page.evaluate(() => Boolean(window.__harnessTerm))).toBe(true);
+}
+
+// The fake CLI's record of its latest start since a mark: ARGV, CWD, ENV and the MCP
+// line (source and servers), parsed.
+export function startRecord(log, mark) {
+  const lines = log.since(mark);
+  const last = (tag) => lines.filter((l) => l.startsWith(`${tag} `)).at(-1)?.slice(tag.length + 1);
+  const mcpLine = last("MCP");
+  const space = mcpLine?.indexOf(" ") ?? -1;
+  return {
+    argv: JSON.parse(last("ARGV") ?? "null"),
+    cwd: last("CWD"),
+    env: JSON.parse(last("ENV") ?? "[]"),
+    mcp: mcpLine ? { source: mcpLine.slice(0, space), servers: JSON.parse(mcpLine.slice(space + 1)) } : null,
+  };
+}
+
+// agent.json as pair.py writes it: owner-only, replaced in one rename.
+export function writeAgentChoice(dataDir, agent, folder) {
+  const temp = join(dataDir, `.agent.json.${process.pid}.tmp`);
+  writeFileSync(temp, JSON.stringify({ agent, folder }), { mode: 0o600 });
+  renameSync(temp, join(dataDir, "agent.json"));
+}
+
+export function removeAgentChoice(dataDir) {
+  rmSync(join(dataDir, "agent.json"), { force: true });
+}
+
+// Turn the canvas bridge on through the Settings row and its consent dialog, then
+// "Start again" (a stop and a start that continues) so the session gets the canvas
+// server. The terminal must be open and its program running.
+export async function bridgeOnAndRestart(page, log) {
+  await page.evaluate(() => window.__showServerRows());
+  const toggle = page.getByRole("switch", { name: "Canvas bridge", exact: true });
+  await expect(toggle).toBeVisible();
+  await toggle.click();
+  const dialog = page.locator('[role="dialog"][aria-label="Turn on the canvas bridge"]');
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Turn on" }).click();
+  await expect(dialog).toBeHidden();
+  const again = page.getByRole("button", { name: "Start again", exact: true });
+  await expect(again).toBeVisible();
+  const beforeRestart = log.mark();
+  await again.click();
+  await log.waitFor(/^READY /, beforeRestart);
+  return beforeRestart;
 }
 
 export async function screenText(page) {

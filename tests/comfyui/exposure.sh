@@ -115,7 +115,7 @@ start_server() {
   ln -s "$REPO" "$SCRATCH/nodes/$NODE_NAME"
   printf 'harness_check:\n  base_path: %s\n  custom_nodes: nodes\n' "$SCRATCH" >"$SCRATCH/extra.yaml"
   # The bridge checks start a session: the fake CLI must win the lookup, never the real one.
-  printf '#!/bin/sh\nexec %q %q "$@"\n' "$PY" "$REPO/tests/browser/fake_cli.py" >"$SCRATCH/bin/claude"
+  printf '#!/bin/sh\nFAKE_CLI_ARGV0="$0" exec %q %q "$@"\n' "$PY" "$REPO/tests/browser/fake_cli.py" >"$SCRATCH/bin/claude"
   chmod 700 "$SCRATCH/bin/claude"
   local server_path="$SCRATCH/bin:$PATH" found
   found="$(PATH="$server_path" command -v claude)"
@@ -340,6 +340,8 @@ check_bridge() {
   logs="$(curl -s --max-time 20 "$BASE/internal/logs/raw")"
   if [[ -n "$logs" && "$logs" != *"$BRIDGE_SECRET"* ]]; then pass "logs hold no bridge secret"; else fail "logs hold the bridge secret (or none returned)"; fi
   if grep -qF "$BRIDGE_SECRET" "$SCRATCH/server.log"; then fail "server output holds the bridge secret"; else pass "server output holds no bridge secret"; fi
+  # The fake CLI logs its argv (secrets masked) and env names; neither may hold the secret.
+  if grep -qF "$BRIDGE_SECRET" "$SCRATCH/fake_cli.log"; then fail "the agent's argv or env names hold the bridge secret"; else pass "the agent's argv and env names hold no bridge secret"; fi
 
   # A secret from an older session opens nothing.
   old="$BRIDGE_SECRET"

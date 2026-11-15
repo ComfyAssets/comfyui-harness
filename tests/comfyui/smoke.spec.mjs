@@ -1,9 +1,12 @@
 // Smoke run in a real ComfyUI (frontend 1.59.1) with the fake CLI; see
-// tools/testing/comfyui.config.mjs. The real claude is never on the lookup path.
-import { readFileSync } from "node:fs";
+// tools/testing/comfyui.config.mjs. A fake CLI stands in under every agent's
+// executable name, first on the lookup path, so no real agent is ever started.
+import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect } from "../browser/playwright.mjs";
-import { cliLog, dialogOf, pairThroughPopup, panelOf } from "../browser/helpers.mjs";
+import {
+  cliLog, dialogOf, pairThroughPopup, panelOf, removeAgentChoice, startRecord, writeAgentChoice,
+} from "../browser/helpers.mjs";
 
 const SCRATCH = process.env.HARNESS_COMFY_SCRATCH;
 const DATA_DIR = join(SCRATCH, "user/__harness");
@@ -111,4 +114,51 @@ test("the harness runs in a real ComfyUI with the fake CLI", async ({ page }) =>
   await expect(settings.getByText("Paired browsers")).toBeVisible();
 
   expect(log.since(mark).filter((line) => line.startsWith("READY")).length).toBe(1);
+});
+
+// One session per agent: agent.json chooses it, "Start again" starts it in the chosen
+// folder, and typed keys reach it.
+test("each agent starts in a real ComfyUI with the fake CLI under its own name", async ({ page }) => {
+  const mark = log.mark();
+  await loadComfy(page);
+  await focusCanvas(page);
+  await page.keyboard.press("Backquote");
+  await pairThroughPopup(page, DATA_DIR);
+  await expect(panelOf(page)).toBeVisible();
+  // The page attaches to the session the test above left running (the fake as claude):
+  // a typed key reaches it.
+  await expect.poll(async () => {
+    await page.keyboard.press("KeyW");
+    return log.typed(mark).includes("w");
+  }, { timeout: 20_000 }).toBe(true);
+  expect(log.since(mark).filter((l) => l.startsWith("EXIT")).length).toBe(0);
+
+  try {
+    for (const agent of ["claude", "codex", "opencode", "copilot"]) {
+      await test.step(agent, async () => {
+        const folder = join(SCRATCH, "folders", agent);
+        mkdirSync(folder, { recursive: true });
+        writeAgentChoice(DATA_DIR, agent, folder);
+        // End the running fake, then start again: the next session uses agent.json.
+        await panelOf(page).click();
+        const exitMark = log.mark();
+        await page.keyboard.press("Control+KeyD");
+        await log.waitFor(/^EXIT ctrl-d$/, exitMark, 20_000);
+        const startMark = log.mark();
+        await panelOf(page).getByRole("button", { name: "Start again", exact: true }).click();
+        await log.waitFor(/^READY \d+x\d+$/, startMark, 20_000);
+        const started = startRecord(log, startMark);
+        expect(started.argv[0]).toBe(join(SCRATCH, "bin", agent));
+        expect(started.cwd).toBe(folder);
+        expect(started.argv).not.toContain("[SECRET]");
+        await panelOf(page).click(); // the Start again button is gone; focus the terminal
+        await page.keyboard.press("KeyQ");
+        await expect.poll(() => log.typed(startMark)).toBe("q");
+        const status = await page.evaluate(async () => (await fetch("/harness/status")).json());
+        expect(status).toMatchObject({ agent, agent_found: true, agent_choice: "saved", agent_folder: folder });
+      });
+    }
+  } finally {
+    removeAgentChoice(DATA_DIR);
+  }
 });
