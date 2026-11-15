@@ -236,6 +236,13 @@ Or choose another agent: python3 <path>/pair.py --setup         [Copy]
 - **Check again** fetches the status again (detection runs on every status
   request) and opens the terminal if the agent is now found.
 - The `pair.py` path is the one the pairing popup already shows.
+- The panel's PATH hint says "ComfyUI's PATH does not include its folder":
+  the page is never told the path `pair.py` found, so it cannot name the
+  folder the way `pair.py` does.
+- After a start that asked to continue, the page reads
+  `session.fresh_after_change` from the status and, when true, says "Started
+  a new conversation: the agent or folder changed." The `started` message
+  carries no such field.
 
 Settings › Harness › Server shows "Agent: Codex CLI in
 /home/vito/comfy/ComfyUI" with "✓ found" or the install hint, the

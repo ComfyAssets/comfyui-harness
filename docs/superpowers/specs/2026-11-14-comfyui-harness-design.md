@@ -7,6 +7,11 @@ Two review rounds and a throwaway spike are behind this draft. Their findings
 are in `concepts_brief.md`. Claims marked **(spike)** were observed running;
 claims marked **(source)** were read in ComfyUI 0.45.0's source.
 
+The onboarding design (`2026-11-15-onboarding-agents-design.md`) extends this
+spec: four agents instead of one, chosen with the folder on the machine by
+`pair.py`. The sections below are updated to match; for the agent choice and
+onboarding it wins over this spec.
+
 ## 1. Intent
 
 People who use an LLM agent with ComfyUI leave ComfyUI for a separate terminal
@@ -27,7 +32,7 @@ Release 1 is for the author alone.
 | | Release 1 | Later, before publishing |
 |---|---|---|
 | Platform | Linux | macOS; Windows needs its own PTY backend |
-| Agent CLI | Claude Code | Codex CLI, Gemini CLI |
+| Agent CLI | Claude Code, Codex CLI, opencode, Copilot CLI (onboarding spec) | Gemini CLI, pi, Antigravity, once each has a per-session MCP route |
 | Browser that must pass tests | Chromium | Firefox, WebKit |
 | Server owner | one person | still one; shared servers stay out |
 
@@ -207,7 +212,7 @@ GET, `Sec-Fetch-Site: same-origin`. Everything else is **unpaired**.
 
 | Route | Method | Unpaired | Paired | Body in, body out |
 |---|---|---|---|---|
-| `/harness/status` | GET | yes | yes | out: `{supported, paired, enabled}`; paired callers also get `{cli_found, mcp_found, session, origin}` (origin: the address this browser paired from) and the bridge fields `{bridge_enabled, bridge_edits, bridge_runs, bridge_available, bridge_reason, bridge_live}` (bridge spec 9) |
+| `/harness/status` | GET | yes | yes | out: `{supported, paired, enabled}`; paired callers also get `{cli_found, mcp_found, session, origin}` (origin: the address this browser paired from; `session.fresh_after_change` is true when the last "continue" started a new conversation because the agent or folder changed), the agent fields `{agent, agent_name, agent_found, agent_install, agent_folder, agent_folder_ok, agent_choice, agent_choice_reason, agent_unprompted, agents_installed, pair_script}` (`agent_choice` is `saved`, `default` or `ignored`; `agent_unprompted` is true, false, or null when not checked for that agent; `cli_found` equals `agent_found`, for older pages) and the bridge fields `{bridge_enabled, bridge_edits, bridge_runs, bridge_available, bridge_reason, bridge_live}` (bridge spec 9) |
 | `/harness/pair/request` | POST | yes | yes | out: `{code, poll_secret, expires_in, command, docker_command}` |
 | `/harness/pair/poll` | POST | yes | yes | header `X-Harness-Poll`; out: `{state: waiting, rejected, expired, paired}` |
 | `/harness/pair/browsers` | GET | no | yes | out: list of `{id, label, origin, created, last_seen, current}` |
@@ -233,11 +238,17 @@ Refusals are `{ "error": { "code", "message" } }`:
 | `insecure_origin` | 400 | pair request | the HTTPS explanation |
 | `disabled` | 409 | WebSocket | the enable button |
 | `unsupported_platform` | 501 | pair request, WebSocket | the platform message |
-| `cli_not_found` | 409 | WebSocket start | what was looked for and where |
+| `agent_not_installed` | 409 | WebSocket start | the agent's install command, `pair.py --setup`, the PATH hint and Check again (no supported agent at all: all four install commands) |
+| `agent_choice_ignored` | 409 | WebSocket start | "agent.json ignored: <reason>", `pair.py --setup` and Check again; no agent is started in its place |
+| `folder_missing` | 409 | WebSocket start | the folder, `pair.py --setup` and Check again |
 | `spawn_failed` | 500 | WebSocket start | the reason |
 | `unsafe_permissions` | 500 | status, any route | which path, and the fix |
 | `bad_state` | 500 | status, any route | "state file unreadable; see README" |
 | `bridge_refused` | 403 | `/harness/mcp` | nothing: no page calls it; the body never says which check failed |
+
+A WebSocket start refusal travels as `{type:"error", code, message}` on the
+socket; its status is nominal. The page does not wait for one to show the
+agent views: it reads the status fields before it starts.
 
 ## 8. Files
 
@@ -251,7 +262,9 @@ does not create it, so the package creates it at import, mode 700.
 | `key` | The machine key. |
 | `state.json` | See below. Read once at start; memory is authoritative after that, and each change is written atomically (temp file, fsync, rename). |
 | `pair` | Written by `pair.py`. |
-| `mcp.json` | The per-session MCP file handed to the CLI: the `comfy-mcp` entry, and the `canvas` entry with the session's bridge secret when the bridge was on at session start. Mode 600. |
+| `agent.json` | Written by `pair.py`: `{"agent": "<id>", "folder": "<absolute path>"}`. Read at every session start; see the onboarding spec, section 3. |
+| `mcp.json` | Claude Code's per-session MCP file: the `comfy-mcp` entry, and the `canvas` entry with the session's bridge secret when the bridge was on at session start. Mode 600. |
+| `copilot-mcp.json` | The same servers in Copilot CLI's format, for a Copilot session. Mode 600. A session removes the file the agent it starts does not use. |
 | `session.pid` | The running agent's process-group id, for cleanup after a crash. |
 
 ```json
@@ -275,8 +288,11 @@ with `unsafe_permissions`. A missing `state.json` means a fresh install. An
 unreadable one, or a schema newer than the code knows, is `bad_state`; the
 README says to move the file aside, which removes pairings and nothing else.
 
-The agent's working directory is ComfyUI's base directory, so custom nodes,
-models and workflows are in reach. It is not inside the data directory.
+The agent's working directory is the owner's choice, made with `pair.py` and
+saved in `agent.json`. Without the file it is ComfyUI's base directory, so
+custom nodes, models and workflows are in reach. If the folder has gone, the
+session does not start (`folder_missing`). `state.json` also records
+`last_agent` and `last_folder`, the ones the last session used.
 
 ## 9. The terminal
 
@@ -398,16 +414,25 @@ and a test asserts it.
 
 ### The CLI
 
-A table with one row in release 1. The browser never sends a program name.
+A fixed table of four agents (`harness/cli.py` `CLIS`). The browser never
+sends a program name; the agent comes from `agent.json`, or `claude` without
+it. Each is looked up as its command on `PATH`, then in `~/.local/bin`. How
+the session's servers reach it is built in `harness/launch.py`:
 
-| Id | Looked up as | Arguments | To continue |
-|---|---|---|---|
-| `claude` | `claude` on `PATH`, then `~/.local/bin` | `--mcp-config <data dir>/mcp.json` | adds `--continue` |
+| Id | Command | Session servers | Secret travels in | To continue |
+|---|---|---|---|---|
+| `claude` | `claude` | `--mcp-config <data dir>/mcp.json` | the file | adds `--continue` |
+| `codex` | `codex` | `-c mcp_servers.<name>.<key>=…` per server; the canvas entry names `bearer_token_env_var` | env `HARNESS_CANVAS_TOKEN` | `codex resume --last`, overrides after the subcommand |
+| `opencode` | `opencode` | env `OPENCODE_CONFIG_CONTENT`: `{"mcp": {…}}`, added on top of the user's config | that env var | adds `--continue` |
+| `copilot` | `copilot` | `--additional-mcp-config @<data dir>/copilot-mcp.json` | the file | adds `--continue` |
 
-A test asserts no argument list contains a flag that weakens permission
-prompts.
+When the agent or folder differs from the last session's, "continue" starts a
+new conversation instead, and status reports `session.fresh_after_change`.
+Each agent has its own list of flags that weaken approval prompts
+(`cli.FORBIDDEN` is their union); a test asserts no argument list built for
+any agent contains one, and that no argument list holds the bridge secret.
 
-`mcp.json`, written at session start when `comfy-mcp` is found (next to the server's Python first, then absolute `PATH` entries, then `~/.local/bin`):
+Claude Code's `mcp.json` (the other agents get the same entries in their own format), written at session start when `comfy-mcp` is found (next to the server's Python first, then absolute `PATH` entries, then `~/.local/bin`):
 
 ```json
 { "mcpServers": { "comfy-mcp": {
@@ -480,8 +505,8 @@ Binary frames are terminal bytes. Text frames are JSON. Heartbeat every 25 s.
 
 | Direction | Message |
 |---|---|
-| server to page, first | `{type:"hello", boot, session: null \| {cli, started}}` |
-| page to server | `{type:"attach", cols, rows}`, `{type:"start", cli, cols, rows, resume}`, `{type:"resize", cols, rows}`, `{type:"stop"}` |
+| server to page, first | `{type:"hello", boot, session: null \| {cli, started}}` (`cli`: the agent actually running) |
+| page to server | `{type:"attach", cols, rows}`, `{type:"start", cols, rows, resume}`, `{type:"resize", cols, rows}`, `{type:"stop"}`. A `cli` field in `start` (an older page) is accepted and ignored |
 | server to page | `{type:"started"}`, `{type:"exit", code}`, `{type:"detached", reason}`, `{type:"error", code, message}` |
 | server to page, canvas bridge | `{type:"bridge", rid, cmd, args}`: one MCP tool call, sent only to the socket holding the session |
 | page to server, canvas bridge | `{type:"bridge_reply", rid, ok: true, result}` or `{type:"bridge_reply", rid, ok: false, error: {code, message}}`; accepted only on the socket the request went to, for a waiting `rid`, once |
@@ -620,12 +645,12 @@ user's CLI configuration.
 | No proxy configuration; rely on cookie, `Origin`, `Sec-Fetch-Site` | Claude |
 | Pairing refused over plain HTTP except loopback | Claude |
 | MCP supplied per session; nothing global written | Claude |
-| Working directory is ComfyUI's base directory | Claude |
+| Working directory is ComfyUI's base directory | Claude; now the default, the owner chooses another with `pair.py` (onboarding spec) |
 | No output replay on reattach | Claude |
 | Suspended agent is resumed automatically | Claude |
 | Page does not send Ctrl+Z; wheel reports for a mouse-tracking full-screen program | Claude, after Vito's use; full-screen kept by Vito |
 | Idle and detached limits; pairing numbers | Claude |
-| Claude Code and Chromium only in release 1 | Claude, from Vito's scope |
+| Claude Code and Chromium only in release 1 | Claude, from Vito's scope; four agents since the onboarding spec |
 | All gates blocking | Claude |
 
 ## 16. Open
