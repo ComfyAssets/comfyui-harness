@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from harness.cli import (
+    AGENT_IDS,
     CLIS,
     FORBIDDEN,
     CliNotFound,
@@ -32,9 +33,50 @@ def test_no_cli_argument_list_weakens_permissions():
     for cli in CLIS.values():
         for resume in (False, True):
             argv = build_argv(cli, Path("/x/claude"), Path("/d/mcp.json"), resume)
-            assert not set(argv) & set(FORBIDDEN)
-            assert not set(cli.args) & set(FORBIDDEN)
-            assert not set(cli.resume_args) & set(FORBIDDEN)
+            assert not set(argv) & set(cli.forbidden)
+        assert not set(cli.args) & set(cli.forbidden)
+        assert not set(cli.resume_args) & set(cli.forbidden)
+        assert set(cli.forbidden) <= set(FORBIDDEN)
+
+
+def test_cli_table_lists_five_agents():
+    assert AGENT_IDS == ("claude", "codex", "opencode", "copilot", "gemini")
+    assert [(c.id, c.name, c.executable, c.install, c.mcp) for c in CLIS.values()] == [
+        (
+            "claude",
+            "Claude Code",
+            "claude",
+            "curl -fsSL https://claude.ai/install.sh | bash",
+            "claude_file",
+        ),
+        ("codex", "Codex CLI", "codex", "npm i -g @openai/codex", "codex_overrides"),
+        ("opencode", "opencode", "opencode", "npm i -g opencode-ai", "opencode_env"),
+        ("copilot", "Copilot CLI", "copilot", "npm i -g @github/copilot", "copilot_file"),
+        ("gemini", "Gemini CLI", "gemini", "npm i -g @google/gemini-cli", "gemini_settings"),
+    ]
+
+
+def test_resume_forms():
+    assert CLIS["claude"].resume_args == ("--continue",)
+    assert CLIS["codex"].resume_args == ("resume", "--last")
+    assert CLIS["opencode"].resume_args == ("--continue",)
+    assert CLIS["copilot"].resume_args == ("--continue",)
+    assert CLIS["gemini"].resume_args == ("--resume", "latest")
+    assert [c.id for c in CLIS.values() if c.resume_is_subcommand] == ["codex"]
+
+
+@pytest.mark.parametrize(
+    "agent, flags",
+    [
+        ("claude", ("--dangerously-skip-permissions", "--permission-mode")),
+        ("codex", ("--dangerously-bypass-approvals-and-sandbox", "--full-auto")),
+        ("opencode", ("--auto",)),
+        ("gemini", ("--yolo", "-y", "--approval-mode")),
+        ("copilot", ("--allow-all-tools", "--allow-all", "--yolo")),
+    ],
+)
+def test_every_agent_forbids_its_prompt_skipping_flags(agent, flags):
+    assert set(flags) <= set(CLIS[agent].forbidden)
 
 
 def test_argv_with_mcp_and_resume():

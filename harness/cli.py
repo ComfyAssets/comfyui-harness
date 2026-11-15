@@ -19,25 +19,115 @@ from urllib.parse import urlsplit
 @dataclass(frozen=True)
 class Cli:
     id: str
+    name: str
     executable: str
+    install: str
     args: tuple[str, ...]
     resume_args: tuple[str, ...]
+    resume_is_subcommand: bool
+    forbidden: tuple[str, ...]
+    mcp: str  # claude_file | codex_overrides | opencode_env | copilot_file | gemini_settings
 
 
-CLIS: Mapping[str, Cli] = {"claude": Cli("claude", "claude", (), ("--continue",))}
-
-# Flags that weaken permission prompts. A test asserts none is ever passed.
-FORBIDDEN = (
+_CLAUDE_FORBIDDEN = (
     "--dangerously-skip-permissions",
     "--allow-dangerously-skip-permissions",
     "--permission-mode",
+)
+_CODEX_FORBIDDEN = (
     "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+    "--full-auto",
+    "--approve-for-me",
+    "--ask-for-approval",
+    "-a",
+    "--sandbox",
+    "-s",
+)
+_OPENCODE_FORBIDDEN = ("--auto", "--dangerously-skip-permissions")
+_COPILOT_FORBIDDEN = (
+    "--allow-all-tools",
+    "--allow-all",
+    "--allow-all-paths",
+    "--allow-all-urls",
+    "--allow-tool",
+    "--allow-url",
+    "--yolo",
+    "--autopilot",
+    "--mode",
+    "--trust-folder",
+)
+_GEMINI_FORBIDDEN = (
     "--yolo",
     "-y",
     "--approval-mode",
     "--sandbox",
     "-s",
+    "--skip-trust",
+    "--allowed-tools",
 )
+
+CLIS: Mapping[str, Cli] = {
+    "claude": Cli(
+        "claude",
+        "Claude Code",
+        "claude",
+        "curl -fsSL https://claude.ai/install.sh | bash",
+        (),
+        ("--continue",),
+        False,
+        _CLAUDE_FORBIDDEN,
+        "claude_file",
+    ),
+    "codex": Cli(
+        "codex",
+        "Codex CLI",
+        "codex",
+        "npm i -g @openai/codex",
+        (),
+        ("resume", "--last"),
+        True,
+        _CODEX_FORBIDDEN,
+        "codex_overrides",
+    ),
+    "opencode": Cli(
+        "opencode",
+        "opencode",
+        "opencode",
+        "npm i -g opencode-ai",
+        (),
+        ("--continue",),
+        False,
+        _OPENCODE_FORBIDDEN,
+        "opencode_env",
+    ),
+    "copilot": Cli(
+        "copilot",
+        "Copilot CLI",
+        "copilot",
+        "npm i -g @github/copilot",
+        (),
+        ("--continue",),
+        False,
+        _COPILOT_FORBIDDEN,
+        "copilot_file",
+    ),
+    "gemini": Cli(
+        "gemini",
+        "Gemini CLI",
+        "gemini",
+        "npm i -g @google/gemini-cli",
+        (),
+        ("--resume", "latest"),
+        False,
+        _GEMINI_FORBIDDEN,
+        "gemini_settings",
+    ),
+}
+AGENT_IDS = tuple(CLIS)
+
+# Union of every agent's forbidden flags. A test asserts none is ever passed.
+FORBIDDEN = tuple(dict.fromkeys(flag for cli in CLIS.values() for flag in cli.forbidden))
 
 MCP_SERVER = "comfy-mcp"
 CANVAS_SERVER = "canvas"
