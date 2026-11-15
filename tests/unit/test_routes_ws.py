@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import sys
 import types
@@ -15,11 +16,10 @@ from harness.session import SessionManager
 
 from conftest import ORIGIN, PREFIXES, FakeHost, pair
 
-real_write_mcp_file = cli_mod.write_mcp_file
+real_mcp_servers = cli_mod.mcp_servers
 
 pytestmark = pytest.mark.usefixtures("harness_logs")
 
-CWD = Path("/work/dir")
 EXE = Path("/bin/claude")
 WS_PATH = "/terminal/ws"
 UPGRADE = {
@@ -32,10 +32,25 @@ WAIT = 2.0
 QUIET = 0.1
 
 
+MISSING: set = set()
+
+
 def fake_find(cli_id):
-    if cli_id != "claude":
-        raise KeyError(cli_id)
-    return EXE
+    if cli_id in MISSING:
+        raise cli_mod.CliNotFound(cli_id, ("/usr/bin",))
+    return Path(f"/bin/{cli_id}")
+
+
+def save_choice(store, agent, folder):
+    body = json.dumps({"agent": agent, "folder": str(folder)}).encode()
+    cli_mod._write_private_atomically(store.data_dir / "agent.json", body)
+
+
+@pytest.fixture
+def folder(tmp_path):
+    base = tmp_path / "comfy-base"
+    base.mkdir()
+    return base
 
 
 @pytest.fixture
@@ -49,17 +64,16 @@ def made():
 
 
 @pytest.fixture(autouse=True)
-def sessions(deps, host, store, made, monkeypatch):
+def sessions(deps, host, store, made, folder, monkeypatch):
     monkeypatch.setattr(cli_mod, "find", fake_find)
-    monkeypatch.setattr(
-        cli_mod, "write_mcp_file", lambda path, url, **kw: cli_mod.McpEntries(False, False)
-    )
+    MISSING.clear()
+    monkeypatch.setattr(cli_mod, "mcp_servers", lambda url, **kw: {})
 
     def factory():
         made.append(host)
         return host
 
-    deps.sessions = SessionManager(factory, store, CWD, lambda: "http://127.0.0.1:8188")
+    deps.sessions = SessionManager(factory, store, folder, lambda: "http://127.0.0.1:8188")
     return deps.sessions
 
 
@@ -222,14 +236,85 @@ async def test_exit_is_reported_to_the_page(client, deps, host):
     await ws.close()
 
 
-async def test_unknown_cli_is_an_error_message_not_a_close(client, deps):
+async def test_a_missing_agent_is_an_error_message_not_a_close(client, deps):
+    MISSING.add("claude")
     ws, _ = await paired_ws(client, deps)
-    await ws.send_json({"type": "start", "cli": "bash", "cols": 80, "rows": 24, "resume": False})
-    reply = await ws.receive_json(timeout=WAIT)
-    assert reply["type"] == "error" and reply["code"] == "cli_not_found"
-    assert reply["message"]
+    reply = await start(ws)
+    assert reply["type"] == "error" and reply["code"] == "agent_not_installed"
+    assert reply["message"] == "claude was not found. Looked in: /usr/bin"
     assert not ws.closed
+    MISSING.clear()
     assert await start(ws) == {"type": "started"}
+    await ws.close()
+
+
+async def test_an_old_page_naming_claude_starts_the_saved_codex(
+    client, deps, host, store, tmp_path
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    save_choice(store, "codex", project)
+    ws, headers = await paired_ws(client, deps)
+    assert await start(ws, cli="claude") == {"type": "started"}
+    assert host.started.argv == ["/bin/codex"]
+    assert host.started.cwd == project
+    _, hello = await connect(client, headers)
+    assert hello["session"]["cli"] == "codex"
+    await ws.close()
+
+
+@pytest.mark.parametrize("cli", ["bash", 1, None, ["/bin/sh"]])
+async def test_the_cli_field_is_ignored_whatever_it_holds(client, deps, host, cli):
+    ws, _ = await paired_ws(client, deps)
+    assert await start(ws, cli=cli) == {"type": "started"}
+    assert host.started.argv == [str(EXE)]
+    await ws.close()
+
+
+async def test_a_start_without_cli_is_accepted(client, deps, host, folder):
+    ws, _ = await paired_ws(client, deps)
+    await ws.send_json({"type": "start", "cols": 80, "rows": 24, "resume": False})
+    assert await ws.receive_json(timeout=WAIT) == {"type": "started"}
+    assert host.started.argv == [str(EXE)] and host.started.cwd == folder
+    await ws.close()
+
+
+async def test_an_ignored_choice_is_an_error_message_and_nothing_starts(client, deps, host, store):
+    (store.data_dir / "agent.json").write_text('{"agent": "codex"}')
+    (store.data_dir / "agent.json").chmod(0o600)
+    ws, _ = await paired_ws(client, deps)
+    reply = await start(ws)
+    assert reply == {
+        "type": "error",
+        "code": "agent_choice_ignored",
+        "message": "file must hold exactly agent and folder",
+    }
+    assert host.started is None and not ws.closed
+    await ws.close()
+
+
+async def test_a_missing_folder_is_an_error_message_and_nothing_starts(client, deps, host, folder):
+    folder.rmdir()
+    ws, _ = await paired_ws(client, deps)
+    reply = await start(ws)
+    assert reply["type"] == "error" and reply["code"] == "folder_missing"
+    assert host.started is None and not ws.closed
+    await ws.close()
+
+
+async def test_start_again_after_a_change_starts_fresh_and_says_so(
+    client, deps, host, store, tmp_path
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    store.update(lambda s: replace(s, last_agent="claude", last_folder=str(project)))
+    save_choice(store, "codex", project)
+    ws, headers = await paired_ws(client, deps)
+    assert await start(ws, resume=True) == {"type": "started"}
+    assert host.started.argv == ["/bin/codex"]
+    _, hello = await connect(client, headers)
+    assert hello["session"]["fresh_after_change"] is True
+    assert (store.state.last_agent, store.state.last_folder) == ("codex", str(project))
     await ws.close()
 
 
@@ -246,7 +331,7 @@ async def test_unwritable_mcp_file_is_an_error_message_not_a_dropped_socket(
     client, deps, store, monkeypatch
 ):
     store.mcp_path.mkdir()  # mcp.json is a directory
-    monkeypatch.setattr(cli_mod, "write_mcp_file", real_write_mcp_file)
+    monkeypatch.setattr(cli_mod, "mcp_servers", real_mcp_servers)
     monkeypatch.setattr(cli_mod, "find_mcp_server", lambda *a, **k: Path("/b/comfy-mcp"))
     ws, _ = await paired_ws(client, deps)
     reply = await start(ws)
@@ -289,7 +374,11 @@ async def test_second_socket_takes_over_and_first_is_told(client, deps, host):
     first, headers = await paired_ws(client, deps)
     await start(first)
     second, hello = await connect(client, headers)
-    assert hello["session"] == {"cli": "claude", "started": hello["session"]["started"]}
+    assert hello["session"] == {
+        "cli": "claude",
+        "started": hello["session"]["started"],
+        "fresh_after_change": False,
+    }
     await second.send_json({"type": "attach", "cols": 100, "rows": 30})
     assert await first.receive_json(timeout=WAIT) == {"type": "detached", "reason": "taken_over"}
     assert not first.closed
@@ -330,7 +419,6 @@ async def test_malformed_json_is_an_error_message(client, deps):
         {"type": "resize", "cols": 80.0, "rows": 24},
         {"type": "resize", "cols": True, "rows": 24},
         {"type": "resize", "cols": 80},
-        {"type": "start", "cli": 1, "cols": 80, "rows": 24, "resume": False},
         {"type": "start", "cli": "claude", "cols": 80, "rows": 24, "resume": "no"},
         {"type": "start", "cli": "claude", "cols": -1, "rows": 24, "resume": False},
         {"type": "start", "cli": "claude", "cols": 80, "rows": 24},
@@ -671,7 +759,7 @@ async def test_install_on_linux_builds_sessions_and_reaps_once(monkeypatch, tmp_
     deps = install(FakePromptServer())
     assert reaped == [deps.store.pid_path]
     assert isinstance(deps.sessions, SessionManager)
-    assert deps.sessions._cwd == tmp_path / "comfy"
+    assert deps.sessions._default_folder == tmp_path / "comfy"
     made = deps.sessions._host_factory()
     assert isinstance(made, session_host.PtySessionHost)
     assert deps.cli_status is cli_mod.status
@@ -912,7 +1000,7 @@ BRIDGE_TIMEOUT = 10.0
 
 
 @pytest.fixture
-def bridge(deps, host, store, made):
+def bridge(deps, host, store, made, folder):
     """A real Bridge wired to a session manager that holds it, as install() does."""
     from harness.bridge import Bridge
     from harness.routes import page_for_bridge
@@ -930,7 +1018,7 @@ def bridge(deps, host, store, made):
         return host
 
     deps.sessions = SessionManager(
-        factory, store, CWD, lambda: "http://127.0.0.1:8188", bridge=made_bridge
+        factory, store, folder, lambda: "http://127.0.0.1:8188", bridge=made_bridge
     )
     deps.bridge = made_bridge
     return made_bridge

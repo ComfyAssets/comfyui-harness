@@ -382,7 +382,7 @@ def _supported() -> bool:
 
 def _session_manager(
     store: Store,
-    cwd: Path,
+    default_folder: Path,
     comfy_url: Callable[[], str],
     bridge: Optional[Bridge] = None,
 ) -> SessionManager:
@@ -393,7 +393,7 @@ def _session_manager(
     return SessionManager(
         host_factory=lambda: PtySessionHost(asyncio.get_running_loop(), store.pid_path),
         store=store,
-        cwd=cwd,
+        default_folder=default_folder,
         comfy_url=comfy_url,
         bridge=bridge,
     )

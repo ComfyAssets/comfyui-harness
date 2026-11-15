@@ -1,7 +1,7 @@
 """The terminal WebSocket: one socket per page, carrying the single session.
 
 Binary frames are terminal bytes; text frames are small JSON messages. The
-program and its arguments never come from the page, only a CLI id. The canvas
+program, its arguments and its folder never come from the page. The canvas
 bridge rides the same socket: `bridge` frames out, `bridge_reply` frames back.
 
 Nothing shown or typed in the terminal is logged, nor cookies or header values.
@@ -362,12 +362,14 @@ class Terminal:
 
     @staticmethod
     def _start(manager: Any, sink: SocketSink, message: dict) -> None:
+        # Any "cli" field (an older page sends one) is ignored: the agent and its
+        # folder come from the choice saved on the machine.
         cols, rows = _size(message, "cols"), _size(message, "rows")
-        cli, resume = message.get("cli"), message.get("resume")
-        if not isinstance(cli, str) or not isinstance(resume, bool):
-            raise _bad("start needs a cli id and a resume flag.")
+        resume = message.get("resume")
+        if not isinstance(resume, bool):
+            raise _bad("start needs a resume flag.")
         fresh = manager.info() is None
-        manager.start(sink, cli, cols, rows, resume)
+        manager.start(sink, cols, rows, resume)
         if fresh:
             _tell(sink, {"type": "started"})
 
