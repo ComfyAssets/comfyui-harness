@@ -21,7 +21,8 @@ OTHERS_MASK = 0o077
 MAX_STATE_BYTES = 1024 * 1024
 AGENT_FILE = "agent.json"
 DEFAULT_AGENT = "claude"
-MAX_REASON_ECHO = 40
+MAX_AGENT_ECHO = 40
+MAX_FOLDER_ECHO = 200
 LOAD_ATTEMPTS = 3
 _SYMLINK_ERRNOS = (errno.ELOOP, errno.ENOTDIR, errno.EMLINK)
 
@@ -164,6 +165,11 @@ def _check_owner_only(path: Path, st: os.stat_result, what: str) -> None:
         )
 
 
+def _printable(text: str, limit: int) -> str | None:
+    """The text if it is short and has no control characters, else None."""
+    return text if len(text) <= limit and text.isprintable() else None
+
+
 class _ChoiceError(ValueError):
     """agent.json holds a choice the harness will not accept."""
 
@@ -213,6 +219,9 @@ class Store:
                 data = self._read_private(dir_fd, path)
             except StoreError as exc:
                 return self._ignored(default_folder, str(exc))
+            except OSError:
+                # Fixed text: no errno text from the file system.
+                return self._ignored(default_folder, "agent.json could not be read")
         if data is None:
             return AgentChoice(DEFAULT_AGENT, default_folder, "default", "")
         reason = ""
@@ -240,11 +249,21 @@ class Store:
         if not isinstance(agent, str) or not isinstance(folder, str):
             raise _ChoiceError("agent and folder must be strings")
         if agent not in CLIS:
-            raise _ChoiceError(f'unknown agent "{agent[:MAX_REASON_ECHO]}"')
+            shown = _printable(agent, MAX_AGENT_ECHO)
+            raise _ChoiceError(
+                f'unknown agent "{shown}"'
+                if shown is not None
+                else "unknown agent (name not shown)"
+            )
         if not os.path.isabs(folder):
             raise _ChoiceError("folder must be a full path")
         if not os.path.isdir(folder):
-            raise _ChoiceError(f"folder does not exist: {folder}")
+            shown = _printable(folder, MAX_FOLDER_ECHO)
+            raise _ChoiceError(
+                f"folder does not exist: {shown}"
+                if shown is not None
+                else "folder does not exist (path not shown)"
+            )
         return agent, Path(folder)
 
     @contextmanager

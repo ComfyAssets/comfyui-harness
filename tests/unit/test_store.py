@@ -459,9 +459,35 @@ def test_an_unknown_agent_is_ignored(tmp_path):
     assert r.reason == 'unknown agent "pi"'
 
 
-def test_a_long_unknown_agent_name_is_cut_in_the_reason(tmp_path):
-    r = ignored(tmp_path, {"agent": "x" * 500, "folder": str(tmp_path)})
-    assert len(r.reason) < 80
+@pytest.mark.parametrize("name", ["x" * 500, "a\x1b[31mb", "a\nb", "a\x00b"])
+def test_an_unprintable_or_long_agent_name_is_not_echoed(tmp_path, name):
+    r = ignored(tmp_path, {"agent": name, "folder": str(tmp_path)})
+    assert r.reason == "unknown agent (name not shown)"
+
+
+@pytest.mark.parametrize("folder", ["/" + "d" * 300, "/a\x1b[31mb", "/a\nb", "/a\x00b"])
+def test_a_long_or_unprintable_folder_is_not_echoed(tmp_path, folder):
+    r = ignored(tmp_path, {"agent": "codex", "folder": folder})
+    assert r.reason == "folder does not exist (path not shown)"
+
+
+def test_an_unreadable_agent_file_is_ignored_with_fixed_text(tmp_path):
+    store = opened(tmp_path / "d")
+    err = PermissionError(13, "secret detail")
+    with mock.patch.object(Store, "_read_private", side_effect=err):
+        r = store.agent_choice(tmp_path)
+    assert r == AgentChoice("claude", tmp_path, "ignored", "agent.json could not be read")
+
+
+def test_a_state_file_from_before_the_last_choice_loads_with_empty_strings(tmp_path):
+    opened(tmp_path)
+    write_state_file(
+        tmp_path,
+        {"schema": SCHEMA, "instance_id": "ab" * 4, "enabled": True, "browsers": []},
+    )
+    store = Store(tmp_path)
+    store.open()
+    assert (store.state.last_agent, store.state.last_folder) == ("", "")
 
 
 def test_a_relative_folder_is_ignored(tmp_path):
