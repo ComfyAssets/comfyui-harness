@@ -15,7 +15,7 @@ else changes.
 
 | Job | Use | Why |
 |---|---|---|
-| Changing the workflow: nodes, wires, widget values, titles, bypass, running it | The `canvas` tools (see the README) | Each request is checked first, applied as one undo step, put back if it fails part-way, and refused if the canvas changed since the agent read it |
+| Changing the workflow: nodes, wires, widget values, titles, bypass, running it | The `canvas` tools (see [Canvas bridge](canvas-bridge.md)) | Each request is checked first, applied as one undo step, put back if it fails part-way, and refused if the canvas changed since the agent read it |
 | Everything else on the page: menus, dialogs, settings, other extensions' panels, screenshots | Playwriter | It acts on the page like a person; none of the canvas checks apply |
 
 Ask for graph changes through `canvas` even with Playwriter connected. A

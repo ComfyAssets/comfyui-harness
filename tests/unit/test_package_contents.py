@@ -41,6 +41,19 @@ KEPT = (
     "SECURITY.md",
     "docs/brand/banner.webp",
     "docs/playwriter.md",  # the guide Settings and README point to
+    # The user guides and pictures the README points to.
+    "docs/getting-started.md",
+    "docs/agents.md",
+    "docs/remote-access.md",
+    "docs/terminal.md",
+    "docs/canvas-bridge.md",
+    "docs/troubleshooting.md",
+    "docs/screenshots/01-consent.jpg",
+    "docs/screenshots/02-code.jpg",
+    "docs/screenshots/03-pair.png",
+    "docs/screenshots/04-terminal.jpg",
+    "docs/screenshots/05-settings.jpg",
+    "docs/screenshots/06-not-installed.jpg",
     "harness/routes.py",
     "web/harness.js",
 )
