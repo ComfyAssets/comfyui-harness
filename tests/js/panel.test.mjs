@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { viewFor, STOPPED_EVENTS, createPanel } from "../../web/panel.js";
+import { viewFor, STOPPED_EVENTS, createPanel, blocksStart } from "../../web/panel.js";
+import { runningAgent } from "../../web/agents.js";
 import { fakeDocument, fakeEvent, byText, buttons } from "./fake-dom.mjs";
 
 const READY = { supported: true, paired: true, enabled: true, cli_found: true, mcp_found: true, session: null };
@@ -46,6 +47,13 @@ test("exited shows the exit code and start again", () => {
   assert.equal(view.kind, "exited");
   assert.match(view.message, /3/);
   assert.equal(view.action, "start");
+});
+
+test("exited names the chosen agent, or the agent when an older server does not say", () => {
+  const exited = { state: "exited", code: 3 };
+  const codex = viewFor({ status: { ...READY, agent_name: "Codex CLI" }, socket: "open", session: exited });
+  assert.equal(codex.message, "Codex CLI exited with code 3");
+  assert.equal(viewFor({ status: READY, socket: "open", session: exited }).message, "The agent exited with code 3");
 });
 
 test("taken over shows use here", () => {
@@ -237,4 +245,156 @@ test("panel buttons use ComfyUI's button style: the action is primary, × is an 
   assert.match(byText(panel.element, "Pair this browser", "BUTTON").style.background, /^var\(--primary-background, /);
   assert.equal(byText(panel.element, "×", "BUTTON").style.background, "transparent");
   for (const b of all) assert.equal(b.style.cursor, "pointer", b.textContent);
+});
+
+// --- onboarding: the agent, folder or choice chosen on the machine ---
+
+const AGENT = {
+  ...READY,
+  agent: "codex", agent_name: "Codex CLI", agent_found: true, agent_install: "npm i -g @openai/codex",
+  agent_folder: "/home/v/work", agent_folder_ok: true, agent_choice: "saved", agent_choice_reason: null,
+  agent_unprompted: false, agents_installed: ["codex"], pair_script: "/n/comfyui-harness/pair.py",
+};
+const SETUP = "python3 /n/comfyui-harness/pair.py --setup";
+const at = (status) => viewFor({ status, socket: "closed", session: null });
+const commandsOf = (view) => view.commands.map((c) => c.command);
+const PATH_HINT = /ComfyUI's PATH does not include its folder; add it to the PATH ComfyUI starts with\./;
+
+test("a found agent in an existing folder shows the terminal", () => {
+  assert.equal(at(AGENT).kind, "terminal");
+});
+
+test("the chosen agent not installed names it, its install command and the setup command", () => {
+  const view = at({ ...AGENT, agent_found: false, cli_found: false, agents_installed: ["claude"] });
+  assert.equal(view.kind, "agent_missing");
+  assert.equal(view.message, "Codex CLI is not installed on the ComfyUI machine.");
+  assert.deepEqual(view.commands, [
+    { label: "Install it there:", command: "npm i -g @openai/codex" },
+    { label: "Or choose another agent:", command: SETUP },
+  ]);
+  assert.match(view.hint, PATH_HINT);
+  assert.equal(view.action, "check_again");
+});
+
+test("no supported agent installed lists the four install commands and the setup command", () => {
+  const view = at({ ...AGENT, agent: "claude", agent_name: "Claude Code", agent_found: false, cli_found: false, agents_installed: [] });
+  assert.equal(view.kind, "no_agent");
+  assert.equal(view.message, "No supported agent is installed on the ComfyUI machine.");
+  assert.deepEqual(commandsOf(view), [
+    "curl -fsSL https://claude.ai/install.sh | bash",
+    "npm i -g @openai/codex",
+    "npm i -g opencode-ai",
+    "npm i -g @github/copilot",
+    SETUP,
+  ]);
+  assert.match(view.commands[0].label, /Claude Code/);
+  assert.match(view.commands[3].label, /Copilot CLI/);
+  assert.match(view.hint, PATH_HINT);
+  assert.equal(view.action, "check_again");
+});
+
+test("a missing folder names it and the setup command", () => {
+  const view = at({ ...AGENT, agent_folder_ok: false });
+  assert.equal(view.kind, "folder_missing");
+  assert.equal(view.message, "/home/v/work no longer exists. Choose another with:");
+  assert.deepEqual(commandsOf(view), [SETUP]);
+  assert.equal(view.action, "check_again");
+});
+
+test("an ignored choice gives the reason, never the default folder as the missing one", () => {
+  const status = {
+    ...AGENT, agent: "claude", agent_name: "Claude Code", agent_folder: "/default/comfy", agent_folder_ok: true,
+    agent_choice: "ignored", agent_choice_reason: "folder /gone does not exist",
+  };
+  const view = at(status);
+  assert.equal(view.kind, "choice_ignored");
+  assert.equal(view.message, "agent.json ignored: folder /gone does not exist. Run pair.py --setup");
+  assert.deepEqual(commandsOf(view), [SETUP]);
+  assert.equal(view.action, "check_again");
+  assert.equal(view.message.includes("/default/comfy"), false);
+  assert.equal(at({ ...status, agent_found: false, agent_folder_ok: false }).kind, "choice_ignored");
+});
+
+test("an ignored choice without a reason still says it was ignored", () => {
+  const view = at({ ...AGENT, agent_choice: "ignored", agent_choice_reason: null });
+  assert.equal(view.message, "agent.json ignored. Run pair.py --setup");
+});
+
+test("a pair script path with spaces is quoted in the setup command", () => {
+  const view = at({ ...AGENT, agent_folder_ok: false, pair_script: "/my nodes/it's/pair.py" });
+  assert.deepEqual(commandsOf(view), ["python3 '/my nodes/it'\\''s/pair.py' --setup"]);
+});
+
+test("an unprintable folder is not named", () => {
+  const view = at({ ...AGENT, agent_folder: "", agent_folder_ok: false });
+  assert.equal(view.message, "The agent's folder no longer exists. Choose another with:");
+});
+
+test("an older server without the agent fields still gets the cli_missing view", () => {
+  assert.equal(at({ ...READY, cli_found: false }).kind, "cli_missing");
+});
+
+test("an onboarding view draws each command with a Copy button, and Check again", async () => {
+  const actions = [];
+  const copied = [];
+  const env = fakeEnv({ onAction: (a) => actions.push(a) });
+  const p = createPanel({ ...env, clipboard: { writeText: async (t) => copied.push(t) } });
+  p.show(at({ ...AGENT, agent_found: false, cli_found: false }));
+  assert.ok(byText(p.element, "Codex CLI is not installed on the ComfyUI machine."));
+  assert.ok(byText(p.element, "npm i -g @openai/codex", "CODE"));
+  assert.ok(byText(p.element, SETUP, "CODE"));
+  const copies = buttons(p.element).filter((b) => b.textContent === "Copy");
+  assert.equal(copies.length, 2);
+  copies[1].click();
+  assert.deepEqual(copied, [SETUP]);
+  byText(p.element, "Check again", "BUTTON").click();
+  assert.deepEqual(actions, ["check_again"]);
+});
+
+test("the header names the agent and warns when it runs without asking", () => {
+  const p = createPanel(fakeEnv());
+  p.setAgent({ name: "Codex CLI", unprompted: true });
+  assert.ok(byText(p.element, "Codex CLI"));
+  assert.ok(byText(p.element, "⚠ Codex CLI runs without asking"));
+  p.setAgent({ name: "Codex CLI", unprompted: false });
+  assert.equal(byText(p.element, "⚠ Codex CLI runs without asking"), undefined);
+});
+
+// --- a running session is not hidden by a changed choice (spec §3: a change applies at the next start) ---
+
+const RUNNING = { cli: "codex", started: 1, fresh_after_change: false };
+
+for (const [label, change] of [
+  ["a missing agent", { agent_found: false, cli_found: false }],
+  ["a missing folder", { agent_folder_ok: false }],
+  ["an ignored choice", { agent_choice: "ignored", agent_choice_reason: "bad json" }],
+]) {
+  test(`${label} while a session runs still shows the terminal and does not block the start`, () => {
+    const status = { ...AGENT, ...change, session: RUNNING };
+    assert.equal(viewFor({ status, socket: "open", session: { state: "running" } }).kind, "terminal");
+    assert.equal(viewFor({ status, socket: "closed", session: null }).kind, "terminal");
+    assert.equal(blocksStart(status), false);
+    assert.equal(blocksStart({ ...status, session: null }), true);
+  });
+}
+
+test("the exit notice names the agent the session ran, not the one chosen since", () => {
+  const status = { ...AGENT, session: { ...RUNNING, cli: "claude" } };
+  const view = viewFor({ status, socket: "open", session: { state: "exited", code: 1 } });
+  assert.equal(view.message, "Claude Code exited with code 1");
+});
+
+test("runningAgent names the session's agent and badges it only when it is the chosen agent", () => {
+  const warn = { ...AGENT, agent_unprompted: true };
+  assert.deepEqual(runningAgent(warn), { name: "Codex CLI", unprompted: true });
+  assert.deepEqual(runningAgent({ ...warn, session: RUNNING }), { name: "Codex CLI", unprompted: true });
+  assert.deepEqual(runningAgent({ ...warn, session: { ...RUNNING, cli: "opencode" } }), { name: "opencode", unprompted: false });
+  assert.deepEqual(runningAgent({ ...warn, session: { ...RUNNING, cli: "nope" } }), { name: "", unprompted: false });
+});
+
+test("runningAgent gives nothing for an ignored choice with no session: its values are placeholders", () => {
+  const ignored = { ...AGENT, agent_unprompted: true, agent_choice: "ignored" };
+  assert.equal(runningAgent(ignored), null);
+  assert.equal(runningAgent(null), null);
+  assert.deepEqual(runningAgent({ ...ignored, session: { ...RUNNING, cli: "claude" } }), { name: "Claude Code", unprompted: false });
 });

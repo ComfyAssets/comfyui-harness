@@ -189,7 +189,10 @@ function editNotice(summary, counts) {
 
 // ------------------------------------------------------------- bridge
 
-export function createBridge({ host, notify, setInterval: every = () => null, clearInterval: stopEvery = () => {} }) {
+// agentName: the name of the agent the session runs, read when a notice is shown.
+export function createBridge({
+  host, notify, agentName = () => "", setInterval: every = () => null, clearInterval: stopEvery = () => {},
+}) {
   let watch = null; // the shown Undo or run notice: { valid(), clear, timer }
 
   const identity = () => host.identity();
@@ -334,7 +337,7 @@ export function createBridge({ host, notify, setInterval: every = () => null, cl
     }
     const promptId = outcome.prompt_id;
     const state = runWatch();
-    const clear = show("Claude queued a run", {
+    const clear = show(`${text(agentName()) || "The agent"} queued a run`, {
       label: "Cancel",
       onClick: async () => {
         forget();

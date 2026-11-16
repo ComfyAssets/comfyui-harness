@@ -1,24 +1,23 @@
-import json
 import os
-import stat
 import sys
 from pathlib import Path
 
 import pytest
 
+from harness import cli as harness_cli
+from harness.store import AgentChoice
 from harness.cli import (
+    AGENT_IDS,
     CLIS,
     FORBIDDEN,
     CliNotFound,
-    build_argv,
     build_env,
     find,
     comfy_url,
     find_mcp_server,
     find_playwriter,
     status,
-    McpEntries,
-    write_mcp_file,
+    mcp_servers,
 )
 
 
@@ -31,28 +30,46 @@ def make_exe(path: Path, mode: int = 0o755) -> Path:
 
 def test_no_cli_argument_list_weakens_permissions():
     for cli in CLIS.values():
-        for resume in (False, True):
-            argv = build_argv(cli, Path("/x/claude"), Path("/d/mcp.json"), resume)
-            assert not set(argv) & set(FORBIDDEN)
-            assert not set(cli.args) & set(FORBIDDEN)
-            assert not set(cli.resume_args) & set(FORBIDDEN)
+        assert not set(cli.args) & set(cli.forbidden)
+        assert not set(cli.resume_args) & set(cli.forbidden)
+        assert set(cli.forbidden) <= set(FORBIDDEN)
 
 
-def test_argv_with_mcp_and_resume():
-    assert build_argv(CLIS["claude"], Path("/x/claude"), Path("/d/mcp.json"), True) == [
-        "/x/claude",
-        "--mcp-config",
-        "/d/mcp.json",
-        "--continue",
+def test_cli_table_lists_five_agents():
+    assert AGENT_IDS == ("claude", "codex", "opencode", "copilot")
+    assert [(c.id, c.name, c.executable, c.install, c.mcp) for c in CLIS.values()] == [
+        (
+            "claude",
+            "Claude Code",
+            "claude",
+            "curl -fsSL https://claude.ai/install.sh | bash",
+            "claude_file",
+        ),
+        ("codex", "Codex CLI", "codex", "npm i -g @openai/codex", "codex_overrides"),
+        ("opencode", "opencode", "opencode", "npm i -g opencode-ai", "opencode_env"),
+        ("copilot", "Copilot CLI", "copilot", "npm i -g @github/copilot", "copilot_file"),
     ]
 
 
-def test_argv_without_mcp_file_omits_the_flag():
-    assert build_argv(CLIS["claude"], Path("/x/claude"), None, False) == ["/x/claude"]
-    assert build_argv(CLIS["claude"], Path("/x/claude"), None, True) == [
-        "/x/claude",
-        "--continue",
-    ]
+def test_resume_forms():
+    assert CLIS["claude"].resume_args == ("--continue",)
+    assert CLIS["codex"].resume_args == ("resume", "--last")
+    assert CLIS["opencode"].resume_args == ("--continue",)
+    assert CLIS["copilot"].resume_args == ("--continue",)
+    assert [c.id for c in CLIS.values() if c.resume_is_subcommand] == ["codex"]
+
+
+@pytest.mark.parametrize(
+    "agent, flags",
+    [
+        ("claude", ("--dangerously-skip-permissions", "--permission-mode")),
+        ("codex", ("--dangerously-bypass-approvals-and-sandbox", "--full-auto")),
+        ("opencode", ("--auto",)),
+        ("copilot", ("--allow-all-tools", "--allow-all", "--yolo", "--assisted-approval")),
+    ],
+)
+def test_every_agent_forbids_its_prompt_skipping_flags(agent, flags):
+    assert set(flags) <= set(CLIS[agent].forbidden)
 
 
 def test_find_prefers_path_then_local_bin(tmp_path):
@@ -128,7 +145,7 @@ URL = "http://127.0.0.1:8188"
 
 
 def lookup(tmp_path: Path, python: str = "") -> dict:
-    """Where write_mcp_file and status look: a fake PATH, home and server Python."""
+    """Where mcp_servers and status look: a fake PATH, home and server Python."""
     return {
         "path": str(tmp_path / "pathbin"),
         "home": tmp_path / "home",
@@ -140,24 +157,22 @@ def on_path(tmp_path: Path) -> Path:
     return make_exe(tmp_path / "pathbin" / "comfy-mcp")
 
 
-def mcp_env(tmp_path: Path) -> dict:
-    return json.loads((tmp_path / "mcp.json").read_text())["mcpServers"]["comfy-mcp"]["env"]
+def mcp_env(tmp_path: Path, url: str = URL, which=None) -> dict:
+    which = which or {"comfy": "/b/comfy"}.get
+    return mcp_servers(url, which=which, **lookup(tmp_path))["comfy-mcp"]["env"]
 
 
-def test_mcp_file_contents(tmp_path):
+def test_mcp_server_entries(tmp_path):
     server = on_path(tmp_path)
-    ok = write_mcp_file(
-        tmp_path / "mcp.json",
+    servers = mcp_servers(
         URL,
         which={"comfy": "/b/comfy"}.get,
         **lookup(tmp_path, python="/venv/bin/python"),
     )
-    assert ok.comfy and json.loads((tmp_path / "mcp.json").read_text()) == {
-        "mcpServers": {
-            "comfy-mcp": {
-                "command": str(server),
-                "env": {"COMFYUI_URL": URL, "COMFY_BIN": "/b/comfy"},
-            }
+    assert servers == {
+        "comfy-mcp": {
+            "command": str(server),
+            "env": {"COMFYUI_URL": URL, "COMFY_BIN": "/b/comfy"},
         }
     }
 
@@ -167,8 +182,7 @@ def test_comfy_mcp_next_to_the_servers_python_comes_first(tmp_path):
     make_exe(tmp_path / "home" / ".local" / "bin" / "comfy-mcp")
     beside = make_exe(tmp_path / "venv" / "bin" / "comfy-mcp")
     assert find_mcp_server(**lookup(tmp_path)) == beside
-    assert write_mcp_file(tmp_path / "mcp.json", URL, which={}.get, **lookup(tmp_path))
-    command = json.loads((tmp_path / "mcp.json").read_text())["mcpServers"]["comfy-mcp"]
+    command = mcp_servers(URL, which={}.get, **lookup(tmp_path))["comfy-mcp"]
     assert command["command"] == str(beside)
 
 
@@ -203,64 +217,23 @@ def test_comfy_mcp_lookup_defaults_to_the_servers_python(tmp_path, monkeypatch):
 def test_comfy_next_to_the_servers_python_is_preferred(tmp_path):
     on_path(tmp_path)
     comfy = make_exe(tmp_path / "venv" / "bin" / "comfy")
-    write_mcp_file(tmp_path / "mcp.json", URL, which={"comfy": "/b/comfy"}.get, **lookup(tmp_path))
     assert mcp_env(tmp_path)["COMFY_BIN"] == str(comfy)
 
 
 def test_non_executable_comfy_next_to_python_falls_back_to_path(tmp_path):
     on_path(tmp_path)
     make_exe(tmp_path / "venv" / "bin" / "comfy", 0o644)
-    write_mcp_file(tmp_path / "mcp.json", URL, which={"comfy": "/b/comfy"}.get, **lookup(tmp_path))
     assert mcp_env(tmp_path)["COMFY_BIN"] == "/b/comfy"
 
 
 def test_comfy_bin_is_omitted_when_comfy_is_nowhere(tmp_path):
     on_path(tmp_path)
-    write_mcp_file(tmp_path / "mcp.json", "https://10.0.0.5:9000", which={}.get, **lookup(tmp_path))
-    assert mcp_env(tmp_path) == {"COMFYUI_URL": "https://10.0.0.5:9000"}
+    env = mcp_env(tmp_path, "https://10.0.0.5:9000", {}.get)
+    assert env == {"COMFYUI_URL": "https://10.0.0.5:9000"}
 
 
-def test_mcp_file_is_not_written_when_comfy_mcp_is_missing(tmp_path):
-    assert write_mcp_file(
-        tmp_path / "mcp.json", URL, which={}.get, **lookup(tmp_path)
-    ) == McpEntries(False, False)
-    assert not (tmp_path / "mcp.json").exists()
-
-
-def test_stale_mcp_file_is_removed_when_comfy_mcp_is_missing(tmp_path):
-    (tmp_path / "mcp.json").write_text("{}")
-    assert write_mcp_file(
-        tmp_path / "mcp.json", URL, which={}.get, **lookup(tmp_path)
-    ) == McpEntries(False, False)
-    assert not (tmp_path / "mcp.json").exists()
-
-
-def test_mcp_file_is_owner_only(tmp_path):
-    on_path(tmp_path)
-    write_mcp_file(tmp_path / "mcp.json", URL, which={}.get, **lookup(tmp_path))
-    assert stat.S_IMODE((tmp_path / "mcp.json").stat().st_mode) == 0o600
-
-
-def test_mcp_file_replaces_an_existing_file_and_leaves_no_temp_files(tmp_path):
-    on_path(tmp_path)
-    target = tmp_path / "out" / "mcp.json"
-    target.parent.mkdir()
-    target.write_text("old")
-    assert write_mcp_file(target, "http://127.0.0.1:1", which={}.get, **lookup(tmp_path))
-    assert "127.0.0.1:1" in target.read_text()
-    assert [p.name for p in target.parent.iterdir()] == ["mcp.json"]
-
-
-def test_mcp_file_write_does_not_follow_a_symlink_at_the_target(tmp_path):
-    on_path(tmp_path)
-    victim = tmp_path / "victim"
-    victim.write_text("keep")
-    target = tmp_path / "mcp.json"
-    target.symlink_to(victim)
-    assert write_mcp_file(target, URL, which={}.get, **lookup(tmp_path))
-    assert victim.read_text() == "keep"
-    assert not target.is_symlink()
-    assert json.loads(target.read_text())["mcpServers"]
+def test_no_entries_when_comfy_mcp_is_missing(tmp_path):
+    assert mcp_servers(URL, which={}.get, **lookup(tmp_path)) == {}
 
 
 @pytest.mark.parametrize(
@@ -322,21 +295,23 @@ def test_env_does_not_mutate_its_input():
     assert base == {"COMFYUI_HARNESS_X": "1"}
 
 
+def choice_of(agent="claude", folder=Path("/"), source="default", reason=""):
+    return AgentChoice(agent, folder, source, reason)
+
+
 def test_status_reports_cli_and_mcp(tmp_path):
     make_exe(tmp_path / "pathbin" / "claude")
-    assert status(**lookup(tmp_path)) == {
-        "cli_found": True,
-        "mcp_found": False,
-        "playwriter_found": False,
-    }
+
+    body = status(choice_of(folder=tmp_path), **lookup(tmp_path))
+    assert (body["cli_found"], body["mcp_found"]) == (True, False)
     make_exe(tmp_path / "venv" / "bin" / "comfy-mcp")
-    assert status(**lookup(tmp_path)) == {
-        "cli_found": True,
-        "mcp_found": True,
-        "playwriter_found": False,
-    }
-    neither = status(str(tmp_path / "none"), tmp_path, python="/nowhere/python")
-    assert neither == {"cli_found": False, "mcp_found": False, "playwriter_found": False}
+    body = status(choice_of(folder=tmp_path), **lookup(tmp_path))
+    assert (body["cli_found"], body["mcp_found"]) == (True, True)
+    neither = status(
+        choice_of(folder=tmp_path), str(tmp_path / "none"), tmp_path, "/nowhere/python"
+    )
+    assert (neither["cli_found"], neither["mcp_found"]) == (False, False)
+    assert neither["playwriter_found"] is False
 
 
 def test_find_playwriter_on_path(tmp_path):
@@ -350,7 +325,12 @@ def test_find_playwriter_needs_it_on_path(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     make_exe(tmp_path / "home" / ".local" / "bin" / "playwriter")
     assert find_playwriter(str(tmp_path / "none")) is None
-    assert status(str(tmp_path / "none"), tmp_path / "home")["playwriter_found"] is False
+    assert (
+        status(choice_of(folder=tmp_path), str(tmp_path / "none"), tmp_path / "home")[
+            "playwriter_found"
+        ]
+        is False
+    )
 
 
 def test_find_playwriter_skips_what_cannot_run(tmp_path):
@@ -366,80 +346,136 @@ def test_find_playwriter_skips_what_cannot_run(tmp_path):
 def test_find_playwriter_does_not_look_beside_the_server_python(tmp_path):
     # Playwriter is an npm tool; a venv's bin is not where it lives.
     make_exe(tmp_path / "venv" / "bin" / "playwriter")
-    assert status(**lookup(tmp_path))["playwriter_found"] is False
+    assert status(choice_of(folder=tmp_path), **lookup(tmp_path))["playwriter_found"] is False
 
 
 def test_status_reports_playwriter(tmp_path):
     make_exe(tmp_path / "pathbin" / "playwriter")
-    assert status(**lookup(tmp_path))["playwriter_found"] is True
+    assert status(choice_of(folder=tmp_path), **lookup(tmp_path))["playwriter_found"] is True
 
 
-def test_failed_replace_removes_the_temp_file_and_raises(tmp_path, monkeypatch):
-    def boom(src, dst):
-        raise OSError("disk gone")
+def test_status_describes_the_chosen_agent(tmp_path):
+    make_exe(tmp_path / "pathbin" / "codex")
+    body = status(choice_of("codex", tmp_path, "saved"), **lookup(tmp_path))
+    assert body["agent"] == "codex"
+    assert body["agent_name"] == "Codex CLI"
+    assert body["agent_found"] is True
+    assert body["cli_found"] is True  # equals agent_found: no claude is installed
+    assert body["agent_install"] == "npm i -g @openai/codex"
+    assert body["agent_folder"] == str(tmp_path)
+    assert body["agent_folder_ok"] is True
+    assert body["agent_choice"] == "saved"
+    assert body["agent_choice_reason"] == ""
+    assert body["agents_installed"] == ["codex"]
 
-    monkeypatch.setattr(os, "replace", boom)
-    on_path(tmp_path)
-    (tmp_path / "out").mkdir()
-    with pytest.raises(OSError):
-        write_mcp_file(tmp_path / "out" / "mcp.json", URL, which={}.get, **lookup(tmp_path))
-    assert list((tmp_path / "out").iterdir()) == []
+
+def test_status_cli_found_follows_the_chosen_agent_not_claude(tmp_path):
+    make_exe(tmp_path / "pathbin" / "claude")
+    body = status(choice_of("codex", tmp_path, "saved"), **lookup(tmp_path))
+    assert body["agent_found"] is False
+    assert body["cli_found"] is False
+    assert body["agents_installed"] == ["claude"]
+
+
+def test_agents_installed_lists_only_found_agents_in_table_order(tmp_path):
+    for name in ("copilot", "claude", "opencode"):
+        make_exe(tmp_path / "pathbin" / name)
+    body = status(choice_of(folder=tmp_path), **lookup(tmp_path))
+    assert body["agents_installed"] == ["claude", "opencode", "copilot"]
+
+
+def test_status_flags_a_folder_the_store_found_missing(tmp_path):
+    gone = AgentChoice("claude", tmp_path, "ignored", "any wording", folder_missing=True)
+    assert status(gone, **lookup(tmp_path))["agent_folder_ok"] is False
+
+
+def test_status_does_not_read_the_reason_text_for_the_folder(tmp_path):
+    odd = AgentChoice("claude", tmp_path, "ignored", "folder does not exist: x")
+    assert status(odd, **lookup(tmp_path))["agent_folder_ok"] is True
+
+
+def test_status_shows_only_a_printable_folder(tmp_path):
+    odd = choice_of(folder=tmp_path / "a\nb")
+    assert status(odd, **lookup(tmp_path))["agent_folder"] == ""
+    assert status(choice_of(folder=tmp_path), **lookup(tmp_path))["agent_folder"] == str(tmp_path)
+
+
+def test_status_treats_no_home_as_not_checked(tmp_path, monkeypatch):
+    def broken():
+        raise RuntimeError("no home")
+
+    monkeypatch.setattr(Path, "home", staticmethod(broken))
+    make_exe(tmp_path / "pathbin" / "claude")
+    body = status(choice_of(folder=tmp_path), str(tmp_path / "pathbin"), None, "/nowhere/python")
+    assert body["agent_unprompted"] is None
+
+
+def test_status_flags_a_missing_folder(tmp_path):
+    body = status(choice_of(folder=tmp_path / "gone"), **lookup(tmp_path))
+    assert body["agent_folder_ok"] is False
+
+
+def test_ignored_choice_reports_the_reason_and_the_default_agent(tmp_path):
+    make_exe(tmp_path / "pathbin" / "claude")
+    ignored = choice_of("claude", tmp_path, "ignored", 'unknown agent "x"')
+    body = status(ignored, **lookup(tmp_path))
+    assert body["agent_choice"] == "ignored"
+    assert body["agent_choice_reason"] == 'unknown agent "x"'
+    assert body["agent"] == "claude"
+    assert body["agent_found"] is True
+    assert body["agent_folder_ok"] is True
+
+
+def test_ignored_for_a_missing_folder_is_not_folder_ok(tmp_path):
+    ignored = AgentChoice(
+        "claude", tmp_path, "ignored", "folder does not exist: /gone", folder_missing=True
+    )
+    body = status(ignored, **lookup(tmp_path))
+    assert body["agent_folder_ok"] is False
+
+
+def test_status_unprompted_follows_the_agents_own_setting(tmp_path):
+    settings = tmp_path / "home" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text('{"permissions": {"defaultMode": "bypassPermissions"}}')
+    body = status(choice_of(folder=tmp_path), **lookup(tmp_path))
+    assert body["agent_unprompted"] is True
+    copilot = status(choice_of("copilot", tmp_path), **lookup(tmp_path))
+    assert copilot["agent_unprompted"] is None
+
+
+def test_pair_script_is_the_absolute_path_beside_the_harness_package(tmp_path):
+    body = status(choice_of(folder=tmp_path), **lookup(tmp_path))
+    expected = Path(harness_cli.__file__).absolute().parent.parent / "pair.py"
+    assert body["pair_script"] == str(expected)
+    assert Path(body["pair_script"]).is_absolute()
 
 
 SECRET = "ab" * 32
 
 
-def read_config(tmp_path: Path) -> dict:
-    return json.loads((tmp_path / "mcp.json").read_text())["mcpServers"]
+def servers_at(tmp_path: Path, url: str) -> dict:
+    return mcp_servers(url, which={}.get, canvas_secret=SECRET, **lookup(tmp_path))
 
 
 def test_the_canvas_entry_is_http_with_a_bearer_header(tmp_path):
     on_path(tmp_path)
-    got = write_mcp_file(
-        tmp_path / "mcp.json", URL + "/", which={}.get, canvas_secret=SECRET, **lookup(tmp_path)
-    )
-    assert got == McpEntries(comfy=True, canvas=True) and got.any
-    assert read_config(tmp_path)["canvas"] == {
+    servers = servers_at(tmp_path, URL + "/")
+    assert list(servers) == ["comfy-mcp", "canvas"]
+    assert servers["canvas"] == {
         "type": "http",
         "url": URL + "/harness/mcp",
         "headers": {"Authorization": "Bearer " + SECRET},
     }
-    assert "comfy-mcp" in read_config(tmp_path)
 
 
-def test_the_file_has_only_canvas_when_comfy_mcp_is_missing(tmp_path):
-    got = write_mcp_file(
-        tmp_path / "mcp.json", URL, which={}.get, canvas_secret=SECRET, **lookup(tmp_path)
-    )
-    assert got == McpEntries(comfy=False, canvas=True)
-    assert list(read_config(tmp_path)) == ["canvas"]
-
-
-def test_the_file_is_removed_when_neither_entry_applies(tmp_path):
-    (tmp_path / "mcp.json").write_text("{}")
-    got = write_mcp_file(tmp_path / "mcp.json", URL, which={}.get, **lookup(tmp_path))
-    assert got == McpEntries(comfy=False, canvas=False) and not got.any
-    assert not (tmp_path / "mcp.json").exists()
+def test_only_canvas_when_comfy_mcp_is_missing(tmp_path):
+    assert list(servers_at(tmp_path, URL)) == ["canvas"]
 
 
 def test_no_canvas_entry_when_comfyui_serves_tls(tmp_path):
     on_path(tmp_path)
-    got = write_mcp_file(
-        tmp_path / "mcp.json",
-        "https://127.0.0.1:8188",
-        which={}.get,
-        canvas_secret=SECRET,
-        **lookup(tmp_path),
-    )
-    assert got == McpEntries(comfy=True, canvas=False)
-    assert "canvas" not in read_config(tmp_path)
-
-
-def test_the_file_is_still_owner_only(tmp_path):
-    write_mcp_file(
-        tmp_path / "mcp.json", URL, which={}.get, canvas_secret=SECRET, **lookup(tmp_path)
-    )
-    assert stat.S_IMODE((tmp_path / "mcp.json").stat().st_mode) == 0o600
+    assert list(servers_at(tmp_path, "https://127.0.0.1:8188")) == ["comfy-mcp"]
 
 
 @pytest.mark.parametrize(
@@ -451,11 +487,8 @@ def test_the_file_is_still_owner_only(tmp_path):
         "http://[::1]:8188",
     ],
 )
-def test_the_canvas_entry_is_written_for_loopback_urls(tmp_path, url):
-    got = write_mcp_file(
-        tmp_path / "mcp.json", url, which={}.get, canvas_secret=SECRET, **lookup(tmp_path)
-    )
-    assert got.canvas
+def test_the_canvas_entry_is_given_for_loopback_urls(tmp_path, url):
+    assert "canvas" in servers_at(tmp_path, url)
 
 
 @pytest.mark.parametrize(
@@ -470,11 +503,7 @@ def test_the_canvas_entry_is_written_for_loopback_urls(tmp_path, url):
     ],
 )
 def test_no_canvas_entry_for_non_loopback_urls(tmp_path, url):
-    got = write_mcp_file(
-        tmp_path / "mcp.json", url, which={}.get, canvas_secret=SECRET, **lookup(tmp_path)
-    )
-    assert not got.canvas
-    assert not (tmp_path / "mcp.json").exists()
+    assert servers_at(tmp_path, url) == {}
 
 
 @pytest.mark.parametrize(
@@ -491,3 +520,22 @@ def test_comfy_url_for_listen_values(listen, expected):
     from harness.cli import comfy_url
 
     assert comfy_url(listen, 8188, False) == expected
+
+
+def test_mcp_servers_returns_entries_and_writes_nothing(tmp_path):
+    server = on_path(tmp_path)
+    servers = mcp_servers(URL, which={}.get, canvas_secret="s", **lookup(tmp_path))
+    assert servers["comfy-mcp"] == {"command": str(server), "env": {"COMFYUI_URL": URL}}
+    assert set(servers) == {"comfy-mcp", "canvas"}
+    assert servers["canvas"]["headers"] == {"Authorization": "Bearer s"}
+    assert list(tmp_path.glob("**/mcp.json")) == []
+
+
+def test_page_agent_table_matches_harness_table():
+    """web/agents.js keeps its own copy of the ids, names and install commands."""
+    import re
+
+    source = (Path(__file__).parents[2] / "web" / "agents.js").read_text()
+    rows = re.findall(r'\{ id: "([^"]+)", name: "([^"]+)", install: "([^"]+)" \}', source)
+
+    assert tuple(rows) == tuple((c.id, c.name, c.install) for c in CLIS.values())

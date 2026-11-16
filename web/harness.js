@@ -6,15 +6,18 @@ import { createBridge, errorsFrom, outputsFrom, refusalFrom, runStateFrom } from
 import { decide, isEditable } from "./keys.js";
 import { getStatus, listBrowsers, openSocket, revokeBrowser, setEnabled } from "./client.js";
 import { createBridgeDialog, createPairingDialog } from "./dialogs.js";
-import { createPanel, viewFor } from "./panel.js";
+import { blocksStart, createPanel, viewFor } from "./panel.js";
+import { runningAgent } from "./agents.js";
 import { IDS, readSettings, registerSettings, renderServerRows } from "./settings.js";
 import { createWheel, isSuspendKey, reportBytes } from "./wheel.js";
 
-const CLI = "claude";
 const THEME = Object.freeze({ background: "#101018", foreground: "#d0d4e0" });
 const VENDOR = "./vendor/ghostty-web/ghostty-web.mjs";
 const RUNNING_OR_NEW = new Set([undefined, "running"]);
 const SGR_MOUSE = 1006;
+// Refusals that mean the machine's choice stops the start; the status says which view to show.
+const CHOICE_REFUSALS = new Set(["agent_not_installed", "agent_choice_ignored", "folder_missing"]);
+const FRESH_AFTER_CHANGE = "Started a new conversation: the agent or folder changed.";
 
 // The theme background is always opaque: a transparent one leaves stale text on redraw.
 export function terminalOptions(fontSize) {
@@ -237,6 +240,7 @@ export function createHarness({
   let loading = null;
   let opening = false;
   let pendingResume = null; // a start chosen while the socket was down: false or true (resume)
+  let resumeAsked = false; // the last start asked to resume; "started" then checks it was kept
 
   const panel = createPanel({ document, matchMedia, onClose: () => close(), onAction: (a) => act(a) });
   const dialog = createPairingDialog({
@@ -269,6 +273,7 @@ export function createHarness({
   const bridge = createBridge({
     host: host ?? createComfyHost(comfy, win),
     notify: (text, button) => panel.notify(text, button),
+    agentName: () => runningAgent(status)?.name ?? "",
     setInterval: every,
     clearInterval: stopEvery,
   });
@@ -279,7 +284,11 @@ export function createHarness({
   const wrongOrigin = () => Boolean(status?.origin) && status.origin !== here;
   const size = () => ({ cols: terminal?.term.cols ?? 80, rows: terminal?.term.rows ?? 24 });
   const send = (message) => socket?.send(message);
-  const sendStart = (resume) => send({ type: "start", cli: CLI, ...size(), resume });
+  // The agent and its folder are chosen on the machine; the page sends no cli.
+  const sendStart = (resume) => {
+    resumeAsked = resume;
+    send({ type: "start", ...size(), resume });
+  };
 
   async function fetchStatus() {
     try {
@@ -288,7 +297,24 @@ export function createHarness({
       status = null;
       panel.showError(String(error?.message ?? error));
     }
+    if (status) panel.setAgent(runningAgent(status) ?? {});
     return status;
+  }
+
+  // Asks once which agent the new session runs, for the header and notices, and
+  // whether a resume across a change of agent or folder started a new conversation.
+  async function afterStarted() {
+    const resumed = resumeAsked;
+    resumeAsked = false;
+    await fetchStatus();
+    if (resumed && status?.session?.fresh_after_change === true) panel.notify(FRESH_AFTER_CHANGE);
+    render();
+  }
+
+  async function afterChoiceRefusal() {
+    await fetchStatus();
+    if (blocksStart(status)) dropSocket();
+    render();
   }
 
   async function ensureTerminal() {
@@ -400,6 +426,7 @@ export function createHarness({
         break;
       case "started":
         session = { state: "running" };
+        afterStarted();
         break;
       case "exit":
         session = { state: "exited", code: message.code };
@@ -411,6 +438,7 @@ export function createHarness({
         break;
       case "error":
         panel.showError(`${message.code}: ${message.message}`);
+        if (CHOICE_REFUSALS.has(message.code)) afterChoiceRefusal();
         break;
       case "paired": {
         const browser = message.browser ?? {};
@@ -467,7 +495,7 @@ export function createHarness({
         panel.setOpen(false);
         dialog.open();
       }
-    } else if (wrongOrigin() || !status.enabled || status.cli_found === false) {
+    } else if (wrongOrigin() || !status.enabled || blocksStart(status)) {
       dropSocket();
     } else {
       refused.retry();
@@ -497,18 +525,19 @@ export function createHarness({
     render();
   }
 
-  async function open() {
+  // fetched: Check again has just fetched the status; use it rather than ask twice.
+  async function open({ fetched = false } = {}) {
     if (opening) return;
     opening = true;
     try {
-      await fetchStatus();
+      if (!fetched) await fetchStatus();
       if (status && status.supported && !status.paired) {
         panel.setOpen(false);
         dialog.open();
         return;
       }
       showPanel();
-      if (!status || !status.supported || !status.enabled || status.cli_found === false) return;
+      if (!status || !status.supported || !status.enabled || blocksStart(status)) return;
       if (wrongOrigin()) return;
       try {
         await ensureTerminal();
@@ -530,7 +559,13 @@ export function createHarness({
   }
 
   async function act(action) {
-    if (action === "pair") {
+    if (action === "check_again") {
+      // Detection runs on every status request.
+      panel.showError("");
+      await fetchStatus();
+      if (status && !blocksStart(status)) await open({ fetched: true });
+      else render();
+    } else if (action === "pair") {
       dialog.open();
     } else if (action === "enable") {
       try {

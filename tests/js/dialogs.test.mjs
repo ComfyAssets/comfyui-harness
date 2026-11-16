@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BRIDGE_DISCLOSURE, DISCLOSURE, createBridgeDialog, createPairingDialog } from "../../web/dialogs.js";
+import { AGENT_SENTENCE, BRIDGE_DISCLOSURE, DISCLOSURE, createBridgeDialog, createPairingDialog } from "../../web/dialogs.js";
 import { HarnessError } from "../../web/client.js";
 
 class El {
@@ -477,3 +477,18 @@ for (const [name, make] of BOTH_DIALOGS) {
     }
   });
 }
+
+test("the popup says, under the command, that pair.py asks which agent and folder", async () => {
+  assert.equal(
+    AGENT_SENTENCE,
+    "After the code is accepted, the command asks which agent to run (Claude Code, Codex CLI, opencode or Copilot CLI) " +
+      "and which folder to start in. The agent may ask you to sign in the first time.",
+  );
+  const s = setup();
+  s.dialog.open();
+  assert.equal(s.root.textContent.includes(AGENT_SENTENCE), false);
+  await s.tick();
+  const texts = s.root.find((e) => e.tagName === "P" || e.tagName === "CODE").map((e) => e.textContent);
+  const sentence = texts.indexOf(AGENT_SENTENCE);
+  assert.ok(sentence > texts.indexOf(PAIR.command), "below the command");
+});

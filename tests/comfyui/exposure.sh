@@ -57,6 +57,7 @@ INSTANCE_ID=""
 COOKIE_PAIR=""
 BRIDGE_SECRET=""
 BODY=""
+PLANTED_MARKER=""
 
 # fetch <curl args...>: writes the body to $BODY (set in start_server) and prints the HTTP status. 000 means curl failed.
 fetch() {
@@ -65,7 +66,8 @@ fetch() {
 
 leaks_secret() {
   [[ -s "$BODY" ]] || return 1
-  grep -qF -e "$KEY_HEX" -e "$INSTANCE_ID" ${BRIDGE_SECRET:+-e "$BRIDGE_SECRET"} "$BODY"
+  grep -qF -e "$KEY_HEX" -e "$INSTANCE_ID" ${BRIDGE_SECRET:+-e "$BRIDGE_SECRET"} \
+    ${PLANTED_MARKER:+-e "$PLANTED_MARKER"} "$BODY"
 }
 
 # expect_refused <name> <curl args...>: a real 4xx answer whose body holds no secret.
@@ -115,7 +117,7 @@ start_server() {
   ln -s "$REPO" "$SCRATCH/nodes/$NODE_NAME"
   printf 'harness_check:\n  base_path: %s\n  custom_nodes: nodes\n' "$SCRATCH" >"$SCRATCH/extra.yaml"
   # The bridge checks start a session: the fake CLI must win the lookup, never the real one.
-  printf '#!/bin/sh\nexec %q %q "$@"\n' "$PY" "$REPO/tests/browser/fake_cli.py" >"$SCRATCH/bin/claude"
+  printf '#!/bin/sh\nFAKE_CLI_ARGV0="$0" exec %q %q "$@"\n' "$PY" "$REPO/tests/browser/fake_cli.py" >"$SCRATCH/bin/claude"
   chmod 700 "$SCRATCH/bin/claude"
   local server_path="$SCRATCH/bin:$PATH" found
   found="$(PATH="$server_path" command -v claude)"
@@ -174,12 +176,23 @@ check_files_not_served() {
   expect_refused "userdata traversal to key (..%2F__harness%2Fkey)" --path-as-is "$BASE/userdata/..%2F__harness%2Fkey"
   expect_refused "userdata traversal (raw ..) to key" --path-as-is "$BASE/userdata/../__harness/key"
   expect_refused "api userdata traversal to key" --path-as-is "$BASE/api/userdata/..%2F__harness%2Fkey"
-  for name in key state.json pair mcp.json; do
+  # agent.json and copilot-mcp.json may not exist yet: plant them (owner-only, a
+  # marker the body check looks for) so a refusal is not just a missing file.
+  local data="$SCRATCH/user/__harness" planted=()
+  PLANTED_MARKER="planted-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+  for name in agent.json copilot-mcp.json; do
+    if [[ ! -e "$data/$name" ]]; then
+      (umask 077; printf '{"marker": "%s"}\n' "$PLANTED_MARKER" > "$data/$name")
+      planted+=("$data/$name")
+    fi
+  done
+  for name in key state.json pair mcp.json agent.json copilot-mcp.json; do
     expect_refused "GET /userdata/__harness/$name" "$BASE/userdata/__harness%2F$name"
     expect_refused "GET /api/userdata/__harness/$name" "$BASE/api/userdata/__harness%2F$name"
     expect_refused "comfy-user header, /userdata/$name" -H "comfy-user: __harness" "$BASE/userdata/$name"
     expect_refused "comfy-user header, /api/userdata/$name" -H "comfy-user: __harness" "$BASE/api/userdata/$name"
   done
+  rm -f "${planted[@]}"
 
   # Listings: parsed JSON. The control must be listed (the form works); ours must not.
   listing="$(list_names "$BASE/api/userdata?dir=.")"
@@ -340,6 +353,10 @@ check_bridge() {
   logs="$(curl -s --max-time 20 "$BASE/internal/logs/raw")"
   if [[ -n "$logs" && "$logs" != *"$BRIDGE_SECRET"* ]]; then pass "logs hold no bridge secret"; else fail "logs hold the bridge secret (or none returned)"; fi
   if grep -qF "$BRIDGE_SECRET" "$SCRATCH/server.log"; then fail "server output holds the bridge secret"; else pass "server output holds no bridge secret"; fi
+  # The fake CLI logs its argv (secrets masked) and env names; neither may hold the secret.
+  if [[ ! -s "$SCRATCH/fake_cli.log" ]]; then fail "the fake CLI log is missing or empty"
+  elif grep -qF "$BRIDGE_SECRET" "$SCRATCH/fake_cli.log"; then fail "the agent's argv or env names hold the bridge secret"
+  else pass "the agent's argv and env names hold no bridge secret"; fi
 
   # A secret from an older session opens nothing.
   old="$BRIDGE_SECRET"

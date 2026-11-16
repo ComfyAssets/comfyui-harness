@@ -5,39 +5,113 @@ fixed table below. This module starts no processes.
 """
 
 import ipaddress
-import json
 import os
-import secrets
 import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import TYPE_CHECKING, Callable, Mapping, Optional
 from urllib.parse import urlsplit
+
+from .unprompted import unprompted
+
+if TYPE_CHECKING:  # store imports this module
+    from .store import AgentChoice
 
 
 @dataclass(frozen=True)
 class Cli:
     id: str
+    name: str
     executable: str
+    install: str
     args: tuple[str, ...]
     resume_args: tuple[str, ...]
+    resume_is_subcommand: bool
+    forbidden: tuple[str, ...]
+    mcp: str  # claude_file | codex_overrides | opencode_env | copilot_file
 
 
-CLIS: Mapping[str, Cli] = {"claude": Cli("claude", "claude", (), ("--continue",))}
-
-# Flags that weaken permission prompts. A test asserts none is ever passed.
-FORBIDDEN = (
+_CLAUDE_FORBIDDEN = (
     "--dangerously-skip-permissions",
     "--allow-dangerously-skip-permissions",
     "--permission-mode",
+)
+_CODEX_FORBIDDEN = (
     "--dangerously-bypass-approvals-and-sandbox",
-    "--yolo",
-    "-y",
-    "--approval-mode",
+    "--dangerously-bypass-hook-trust",
+    "--full-auto",
+    "--approve-for-me",
+    "--ask-for-approval",
+    "-a",
     "--sandbox",
     "-s",
 )
+_OPENCODE_FORBIDDEN = ("--auto", "--dangerously-skip-permissions")
+_COPILOT_FORBIDDEN = (
+    "--allow-all-tools",
+    "--allow-all",
+    "--allow-all-paths",
+    "--allow-all-urls",
+    "--allow-tool",
+    "--allow-url",
+    "--yolo",
+    "--autopilot",
+    "--assisted-approval",
+    "--mode",
+    "--trust-folder",
+)
+
+CLIS: Mapping[str, Cli] = {
+    "claude": Cli(
+        "claude",
+        "Claude Code",
+        "claude",
+        "curl -fsSL https://claude.ai/install.sh | bash",
+        (),
+        ("--continue",),
+        False,
+        _CLAUDE_FORBIDDEN,
+        "claude_file",
+    ),
+    "codex": Cli(
+        "codex",
+        "Codex CLI",
+        "codex",
+        "npm i -g @openai/codex",
+        (),
+        ("resume", "--last"),
+        True,
+        _CODEX_FORBIDDEN,
+        "codex_overrides",
+    ),
+    "opencode": Cli(
+        "opencode",
+        "opencode",
+        "opencode",
+        "npm i -g opencode-ai",
+        (),
+        ("--continue",),
+        False,
+        _OPENCODE_FORBIDDEN,
+        "opencode_env",
+    ),
+    "copilot": Cli(
+        "copilot",
+        "Copilot CLI",
+        "copilot",
+        "npm i -g @github/copilot",
+        (),
+        ("--continue",),
+        False,
+        _COPILOT_FORBIDDEN,
+        "copilot_file",
+    ),
+}
+AGENT_IDS = tuple(CLIS)
+
+# Union of every agent's forbidden flags. A test asserts none is ever passed.
+FORBIDDEN = tuple(dict.fromkeys(flag for cli in CLIS.values() for flag in cli.forbidden))
 
 MCP_SERVER = "comfy-mcp"
 CANVAS_SERVER = "canvas"
@@ -67,9 +141,11 @@ def _search_path(path: Optional[str], home: Optional[Path]) -> list[str]:
     """The absolute PATH entries, then ~/.local/bin."""
     if path is None:
         path = os.environ.get("PATH", "")
-    if home is None:
-        home = Path.home()
     directories = [d for d in path.split(os.pathsep) if d and os.path.isabs(d)]
+    try:
+        home = Path.home() if home is None else home
+    except RuntimeError:  # no HOME and no passwd entry: no ~/.local/bin
+        return directories
     directories.append(str(home / ".local" / "bin"))
     return directories
 
@@ -146,36 +222,6 @@ def _comfy_bin(which: Which, python: str) -> Optional[str]:
     return which("comfy")
 
 
-def _write_private_atomically(target: Path, data: bytes) -> None:
-    temp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-    fd = os.open(temp, flags, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, target)
-    except BaseException:
-        try:
-            os.unlink(temp)
-        except FileNotFoundError:
-            pass
-        raise
-
-
-@dataclass(frozen=True)
-class McpEntries:
-    """Which servers the per-session MCP file holds."""
-
-    comfy: bool
-    canvas: bool
-
-    @property
-    def any(self) -> bool:
-        return self.comfy or self.canvas
-
-
 def is_loopback_http(url: str) -> bool:
     """Plain http to a loopback host only: the bearer token must never leave the machine."""
     try:
@@ -201,15 +247,15 @@ def _canvas_entry(url: str, secret: str) -> dict:
     }
 
 
-def write_mcp_file(
-    mcp_path: Path,
+def mcp_servers(
     url: str,
     which: Which = shutil.which,
     python: Optional[str] = None,
     path: Optional[str] = None,
     home: Optional[Path] = None,
     canvas_secret: Optional[str] = None,
-) -> McpEntries:
+) -> dict[str, dict]:
+    """The session's MCP server entries (Claude's shape); writes nothing."""
     if python is None:
         python = sys.executable
     servers: dict[str, dict] = {}
@@ -222,24 +268,7 @@ def write_mcp_file(
         servers[MCP_SERVER] = {"command": str(server), "env": env}
     if canvas_secret is not None and is_loopback_http(url):
         servers[CANVAS_SERVER] = _canvas_entry(url, canvas_secret)
-    entries = McpEntries(comfy=MCP_SERVER in servers, canvas=CANVAS_SERVER in servers)
-    if not entries.any:
-        try:
-            os.unlink(mcp_path)
-        except FileNotFoundError:
-            pass
-        return entries
-    _write_private_atomically(mcp_path, json.dumps({"mcpServers": servers}, indent=2).encode())
-    return entries
-
-
-def build_argv(cli: Cli, exe: Path, mcp_path: Optional[Path], resume: bool) -> list[str]:
-    argv = [str(exe), *cli.args]
-    if mcp_path is not None:
-        argv += ["--mcp-config", str(mcp_path)]
-    if resume:
-        argv += [*cli.resume_args]
-    return argv
+    return servers
 
 
 def _has_utf8(value: str) -> bool:
@@ -256,18 +285,55 @@ def build_env(base: Mapping[str, str]) -> dict[str, str]:
     return env
 
 
+def _is_found(cli_id: str, path: Optional[str], home: Optional[Path]) -> bool:
+    try:
+        find(cli_id, path, home)
+    except CliNotFound:
+        return False
+    return True
+
+
+def _unprompted(agent: str, home: Optional[Path]) -> Optional[bool]:
+    try:
+        return unprompted(agent, Path.home() if home is None else home)
+    except RuntimeError:  # no HOME and no passwd entry: not checked
+        return None
+
+
+def _folder_ok(choice: "AgentChoice") -> bool:
+    if choice.folder_missing:
+        return False
+    return choice.folder.is_dir()
+
+
 def status(
+    choice: "AgentChoice",
     path: Optional[str] = None,
     home: Optional[Path] = None,
     python: Optional[str] = None,
-) -> dict[str, bool]:
-    try:
-        find("claude", path, home)
-        cli_found = True
-    except CliNotFound:
-        cli_found = False
+) -> dict:
+    """What a paired page needs: the chosen agent, the folder, what else is installed.
+
+    An ignored choice is shown as the default agent for display only; the store
+    has already put the default in `choice` and put the reason in `choice.reason`.
+    """
+    from .store import MAX_FOLDER_ECHO, printable  # store imports this module
+
+    cli = CLIS[choice.agent]
+    found = _is_found(choice.agent, path, home)
     return {
-        "cli_found": cli_found,
+        "cli_found": found,
         "mcp_found": find_mcp_server(python, path, home) is not None,
+        "agent": cli.id,
+        "agent_name": cli.name,
+        "agent_found": found,
+        "agent_install": cli.install,
+        "agent_folder": printable(str(choice.folder), MAX_FOLDER_ECHO) or "",
+        "agent_folder_ok": _folder_ok(choice),
+        "agent_choice": choice.source,
+        "agent_choice_reason": choice.reason,
+        "agent_unprompted": _unprompted(cli.id, home),
+        "agents_installed": [i for i in AGENT_IDS if _is_found(i, path, home)],
         "playwriter_found": find_playwriter(path) is not None,
+        "pair_script": str(Path(__file__).absolute().parent.parent / "pair.py"),
     }

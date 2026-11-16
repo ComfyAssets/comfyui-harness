@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect } from "./playwright.mjs";
-import { cliLog, mcp, mcpConfig, openPaired, panelOf, resetServer } from "./helpers.mjs";
+import { bridgeOnAndRestart, cliLog, mcp, mcpConfig, openPaired, panelOf, resetServer } from "./helpers.mjs";
 
 const STATE = process.env.HARNESS_TEST_STATE;
 const PORT = process.env.HARNESS_TEST_PORT;
@@ -40,17 +40,7 @@ async function flip(page, name, on) {
 async function bridgeOn(page) {
   await openPaired(page, dataDir());
   await log.waitFor(/^READY /, mark);
-  await showRows(page);
-  await serverSwitch(page, "Canvas bridge").click();
-  const dialog = bridgeDialogOf(page);
-  await expect(dialog).toBeVisible();
-  await dialog.getByRole("button", { name: "Turn on" }).click();
-  await expect(dialog).toBeHidden();
-  const again = page.getByRole("button", { name: "Start again" });
-  await expect(again).toBeVisible();
-  const beforeRestart = log.mark();
-  await again.click();
-  await log.waitFor(/^READY /, beforeRestart);
+  await bridgeOnAndRestart(page, log);
   await expect.poll(() => Boolean(mcpConfig(dataDir())?.mcpServers?.canvas)).toBe(true);
   return mcp(dataDir());
 }
@@ -212,7 +202,7 @@ test("with runs off, run is refused; with runs on it queues and the notice offer
   expect(run.result.prompt_id).toMatch(/^prompt-\d+$/);
   expect(await page.evaluate(() => window.__stub.queued)).toEqual([run.result.prompt_id]);
 
-  await expect(panelOf(page)).toContainText("Claude queued a run");
+  await expect(panelOf(page)).toContainText("Claude Code queued a run");
   await panelOf(page).getByRole("button", { name: "Cancel" }).click();
   await expect.poll(() => page.evaluate(() => window.__stub.cancelled)).toEqual([run.result.prompt_id]);
 });

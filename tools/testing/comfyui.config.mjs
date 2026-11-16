@@ -3,8 +3,8 @@
 // Starts a second, throwaway ComfyUI on 127.0.0.1:8774 from COMFYUI_DIR
 // (default ~/comfy/ComfyUI) with every custom node disabled except this one (as comfyui-harness-under-test),
 // linked in from a scratch directory that also holds its user, temp, input and
-// output directories. A fake `claude` is first on its PATH, so the real CLI is
-// never started.
+// output directories. A fake claude, codex, opencode and copilot are first on its
+// PATH, so no real agent is ever started.
 import { defineConfig, devices } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -18,6 +18,8 @@ const port = 8774;
 // Not "comfyui-harness": the author's ComfyUI has its own custom_nodes/comfyui-harness
 // (the main checkout), and a whitelist of that name would load it as well.
 const NODE_NAME = "comfyui-harness-under-test";
+// Every supported agent's executable (harness/cli.py CLIS).
+const AGENTS = ["claude", "codex", "opencode", "copilot"];
 const quote = (text) => `'${text.replaceAll("'", "'\\''")}'`;
 
 function makeScratch() {
@@ -29,10 +31,13 @@ function makeScratch() {
   writeFileSync(join(scratch, "extra.yaml"), `harness_check:\n  base_path: ${scratch}\n  custom_nodes: nodes\n`);
   // Skip the first-run template browser so the canvas takes the first key.
   writeFileSync(join(scratch, "user/default/comfy.settings.json"), JSON.stringify({ "Comfy.TutorialCompleted": true }));
-  const shim = join(scratch, "bin/claude");
   const python = join(repo, ".venv/bin/python");
-  writeFileSync(shim, `#!/bin/sh\nexec ${quote(python)} ${quote(join(repo, "tests/browser/fake_cli.py"))} "$@"\n`);
-  chmodSync(shim, 0o700);
+  const fake = join(repo, "tests/browser/fake_cli.py");
+  for (const agent of AGENTS) {
+    const shim = join(scratch, "bin", agent);
+    writeFileSync(shim, `#!/bin/sh\nFAKE_CLI_ARGV0="$0" exec ${quote(python)} ${quote(fake)} "$@"\n`);
+    chmodSync(shim, 0o700);
+  }
   return scratch;
 }
 
@@ -44,12 +49,14 @@ if (!process.env.HARNESS_COMFY_SCRATCH) {
   process.on("exit", () => rmSync(created, { recursive: true, force: true }));
   const bin = join(process.env.HARNESS_COMFY_SCRATCH, "bin");
   process.env.HARNESS_COMFY_PATH = `${bin}:${process.env.PATH}`;
-  // Never let the real claude start: the shim must win the lookup.
-  const found = execFileSync("sh", ["-c", "command -v claude"], {
-    env: { ...process.env, PATH: process.env.HARNESS_COMFY_PATH },
-  }).toString().trim();
-  if (realpathSync(found) !== realpathSync(join(bin, "claude"))) {
-    throw new Error(`claude resolves to ${found}, not the fake CLI`);
+  // Never let a real agent start: each shim must win the lookup.
+  for (const agent of AGENTS) {
+    const found = execFileSync("sh", ["-c", `command -v ${agent}`], {
+      env: { ...process.env, PATH: process.env.HARNESS_COMFY_PATH },
+    }).toString().trim();
+    if (realpathSync(found) !== realpathSync(join(bin, agent))) {
+      throw new Error(`${agent} resolves to ${found}, not the fake CLI`);
+    }
   }
 }
 const scratch = process.env.HARNESS_COMFY_SCRATCH;

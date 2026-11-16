@@ -1,16 +1,17 @@
 // Browser tests against the fixture server (tests/browser/server.py) and the fake CLI.
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect } from "./playwright.mjs";
 import {
-  cliLog, dialogOf, openPaired, pairThroughPopup, panelOf, pressOnCanvas, resetServer,
-  screenText, setSetting,
+  bridgeOnAndRestart, cliLog, dialogOf, openPaired, pairThroughPopup, panelOf, pressOnCanvas,
+  removeAgentChoice, resetServer, screenText, setSetting, startRecord, writeAgentChoice,
 } from "./helpers.mjs";
 
 const STATE = process.env.HARNESS_TEST_STATE;
 const PORT = process.env.HARNESS_TEST_PORT;
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 const dataDir = () => readFileSync(join(STATE, "data_dir"), "utf8").trim();
+const binDir = () => readFileSync(join(STATE, "bin_dir"), "utf8").trim();
 const log = cliLog(join(STATE, "fake_cli.log"));
 const VENDOR = /ghostty-web\.mjs/;
 
@@ -333,4 +334,121 @@ test("paste goes to the CLI and not to the canvas", async ({ context, page }) =>
   await page.keyboard.press("Control+KeyV");
   await expect.poll(() => log.typed(mark)).toContain("pasted words");
   expect(await page.evaluate(() => window.__canvasPasted)).toBeUndefined();
+});
+
+// Every supported agent, run as the fake CLI under its own executable name. What
+// "Start again" (resume) must look like, and how the session's two servers reach it
+// (harness/launch.py). The canvas server always carries its bearer secret, never on
+// argv: the fake CLI logs "[SECRET]" for any argument holding one.
+const BOTH = { "comfy-mcp": "stdio", canvas: "http+auth" };
+const AGENTS = [
+  {
+    id: "claude", name: "Claude Code", source: "--mcp-config",
+    argv: (exe, data) => [exe, "--mcp-config", join(data, "mcp.json"), "--continue"],
+    env: [], notEnv: ["HARNESS_CANVAS_TOKEN", "OPENCODE_CONFIG_CONTENT"],
+  },
+  {
+    id: "codex", name: "Codex CLI", source: "-c",
+    // resume --last is a subcommand; its -c overrides follow it.
+    argv: (exe) => [exe, "resume", "--last"], prefixOnly: true,
+    env: ["HARNESS_CANVAS_TOKEN"], notEnv: ["OPENCODE_CONFIG_CONTENT"],
+  },
+  {
+    id: "opencode", name: "opencode", source: "OPENCODE_CONFIG_CONTENT",
+    argv: (exe) => [exe, "--continue"],
+    env: ["OPENCODE_CONFIG_CONTENT"], notEnv: ["HARNESS_CANVAS_TOKEN"],
+  },
+  {
+    id: "copilot", name: "Copilot CLI", source: "--additional-mcp-config",
+    argv: (exe, data) => [exe, "--additional-mcp-config", `@${join(data, "copilot-mcp.json")}`, "--continue"],
+    env: [], notEnv: ["HARNESS_CANVAS_TOKEN", "OPENCODE_CONFIG_CONTENT"],
+  },
+];
+
+test.describe("each agent", () => {
+  test.afterEach(() => {
+    removeAgentChoice(dataDir());
+    for (const agent of AGENTS) {
+      const off = join(binDir(), `${agent.id}.off`);
+      if (existsSync(off)) renameSync(off, join(binDir(), agent.id));
+    }
+  });
+
+  test("a choice changed to a missing agent while a session runs still attaches to it", async ({ page }) => {
+    await openPaired(page, dataDir());
+    await log.waitFor(/^READY /, mark);
+    await page.getByRole("button", { name: "Close terminal" }).click();
+    await expect(panelOf(page)).toBeHidden();
+    renameSync(join(binDir(), "codex"), join(binDir(), "codex.off"));
+    writeAgentChoice(dataDir(), "codex", STATE);
+
+    await page.keyboard.press("Control+Backquote");
+    await expect(panelOf(page)).toBeVisible();
+    await expect(panelOf(page)).not.toContainText("is not installed");
+    await expect(panelOf(page).getByRole("button", { name: "Check again" })).toHaveCount(0);
+    await expect(panelOf(page).locator("span").first()).toHaveText("Claude Code");
+    await page.keyboard.press("KeyQ");
+    await log.waitFor(/^KEY b'q'$/, mark);
+    expect(log.since(mark).filter((l) => l.startsWith("READY")).length).toBe(1);
+  });
+
+  for (const agent of AGENTS) {
+    test(`${agent.id}: starts in the chosen folder with both servers, resumes, and recovers once installed`, async ({ page }) => {
+      const folder = join(STATE, `folder-${agent.id}`);
+      mkdirSync(folder, { recursive: true });
+      writeAgentChoice(dataDir(), agent.id, folder);
+      const exe = join(binDir(), agent.id);
+
+      // First start: the chosen program in the chosen folder, not resuming.
+      await openPaired(page, dataDir());
+      await log.waitFor(/^READY /, mark);
+      const first = startRecord(log, mark);
+      expect(first.argv[0]).toBe(exe);
+      expect(first.cwd).toBe(folder);
+      expect(first.argv).not.toContain("--continue");
+      expect(first.argv).not.toContain("resume");
+      expect(first.mcp).toEqual({ source: agent.source, servers: { "comfy-mcp": "stdio" } });
+      const status = await page.evaluate(async () => (await fetch("/harness/status")).json());
+      expect(status).toMatchObject({ agent: agent.id, agent_name: agent.name, agent_found: true, agent_choice: "saved" });
+
+      // Start again with the bridge on: resumes, with both servers, the agent's way.
+      const restart = await bridgeOnAndRestart(page, log);
+      const again = startRecord(log, restart);
+      const expected = agent.argv(exe, dataDir());
+      if (agent.prefixOnly) expect(again.argv.slice(0, expected.length)).toEqual(expected);
+      else expect(again.argv).toEqual(expected);
+      expect(again.argv).not.toContain("[SECRET]");
+      expect(again.cwd).toBe(folder);
+      expect(again.mcp).toEqual({ source: agent.source, servers: BOTH });
+      for (const name of agent.env) expect(again.env).toContain(name);
+      for (const name of agent.notEnv) expect(again.env).not.toContain(name);
+      // The log never holds the secret: no header, and not the file's secret where one is written.
+      expect(log.lines().join("\n")).not.toContain("Bearer ");
+      const file = { claude: "mcp.json", copilot: "copilot-mcp.json" }[agent.id];
+      if (file) {
+        const secret = JSON.parse(readFileSync(join(dataDir(), file), "utf8"))
+          .mcpServers.canvas.headers.Authorization.slice("Bearer ".length);
+        expect(secret.length).toBeGreaterThan(20);
+        expect(log.lines().join("\n")).not.toContain(secret);
+      }
+
+      // The agent goes missing: Start again shows how to install it or choose another.
+      await panelOf(page).click();
+      const exitMark = log.mark();
+      await page.keyboard.press("Control+KeyD");
+      await log.waitFor(/^EXIT ctrl-d$/, exitMark);
+      renameSync(exe, `${exe}.off`);
+      await panelOf(page).getByRole("button", { name: "Start again", exact: true }).click();
+      await expect(panelOf(page)).toContainText(`${agent.name} is not installed on the ComfyUI machine.`);
+      await expect(panelOf(page)).toContainText("pair.py --setup");
+
+      // Installed again: Check again opens the terminal without a page reload.
+      renameSync(`${exe}.off`, exe);
+      const checkMark = log.mark();
+      await panelOf(page).getByRole("button", { name: "Check again" }).click();
+      await log.waitFor(/^READY /, checkMark);
+      expect(startRecord(log, checkMark).argv[0]).toBe(exe);
+      await expect(panelOf(page)).not.toContainText("is not installed");
+    });
+  }
 });

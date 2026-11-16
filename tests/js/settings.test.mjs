@@ -372,3 +372,46 @@ test("every button in the Canvas rows is styled", () => {
     assert.ok(b.style.background, b.textContent);
   }
 });
+
+// --- the agent chosen on the machine ---
+
+const AGENT = {
+  ...PAIRED,
+  agent: "codex", agent_name: "Codex CLI", agent_found: true, agent_install: "npm i -g @openai/codex",
+  agent_folder: "/home/v/work", agent_folder_ok: true, agent_choice: "saved", agent_choice_reason: null,
+  agent_unprompted: false, agents_installed: ["codex"], pair_script: "/n/pair.py",
+};
+const rowsFor = (status) => renderServerRows({ document: fakeDocument(), io: fakeIo(), status, browsers: [], onPair: () => {} });
+
+test("the agent row names the agent, its folder, found, and the setup command", () => {
+  const el = rowsFor(AGENT);
+  assert.ok(byText(el, "Agent: Codex CLI in /home/v/work"));
+  assert.ok(byText(el, "✓ found"));
+  assert.ok(byText(el, "python3 /n/pair.py --setup", "CODE"));
+  assert.equal(byText(el, "(default)"), undefined);
+  assert.equal(byText(el, "Claude Code found"), undefined);
+  assert.equal(el.textContent.includes("runs without asking"), false);
+  assert.equal(el.textContent.includes("Not checked"), false);
+});
+
+test("a missing agent shows its install hint", () => {
+  const el = rowsFor({ ...AGENT, agent_found: false, cli_found: false });
+  assert.equal(byText(el, "✓ found"), undefined);
+  assert.ok(byText(el, "npm i -g @openai/codex", "CODE"));
+});
+
+test("the default choice says (default); an ignored one gives the reason", () => {
+  assert.ok(byText(rowsFor({ ...AGENT, agent_choice: "default" }), "(default)"));
+  const ignored = rowsFor({ ...AGENT, agent_choice: "ignored", agent_choice_reason: "unknown agent" });
+  assert.ok(byText(ignored, "ignored: unknown agent"));
+});
+
+test("an agent that runs without asking gets the badge; an unchecked one says so", () => {
+  assert.ok(byText(rowsFor({ ...AGENT, agent_unprompted: true }), "⚠ Codex CLI runs without asking"));
+  const unchecked = rowsFor({ ...AGENT, agent_unprompted: null });
+  assert.ok(byText(unchecked, "Not checked for Codex CLI: see its own approval settings"));
+});
+
+test("an older server without the agent fields keeps the Claude Code line", () => {
+  assert.ok(byText(rowsFor(PAIRED), "Claude Code found"));
+});

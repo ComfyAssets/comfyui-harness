@@ -1,13 +1,17 @@
 """Fixture server for the browser tests. Never imports ComfyUI.
 
 Serves the real harness routes and terminal on 127.0.0.1 only, with a fresh
-data directory and a `claude` on PATH that runs fake_cli.py. Prints the data
-directory as its first stdout line.
+data directory and every agent's executable (claude, codex, opencode, copilot)
+on PATH running fake_cli.py, plus a `comfy-mcp` that is found but never run.
+PATH holds only those shims and HOME is a scratch folder, so a test that
+removes a shim sees the agent missing and never reaches a real one. Prints the
+data directory as its first stdout line.
 
 Environment:
     HARNESS_TEST_PORT   port, default 8770
-    HARNESS_TEST_STATE  directory shared with the tests: receives `data_dir`
-                        and, unless FAKE_CLI_LOG is set, the fake CLI's log
+    HARNESS_TEST_STATE  directory shared with the tests: receives `data_dir`,
+                        `bin_dir` (the shims) and, unless FAKE_CLI_LOG is set,
+                        the fake CLI's log
     FAKE_CLI_LOG        the fake CLI's log file
 """
 
@@ -41,13 +45,23 @@ HOST = "127.0.0.1"
 DEFAULT_PORT = 8770
 
 
-def write_shim(directory: Path) -> Path:
-    """An executable `claude` that runs the fake CLI with this Python."""
-    shim = directory / "claude"
+def write_shim(directory: Path, name: str) -> Path:
+    """An executable `name` that runs the fake CLI with this Python."""
+    shim = directory / name
     fake = shlex.quote(str(HERE / "fake_cli.py"))
-    shim.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {fake} "$@"\n')
+    python = shlex.quote(sys.executable)
+    shim.write_text(f'#!/bin/sh\nFAKE_CLI_ARGV0="$0" exec {python} {fake} "$@"\n')
     shim.chmod(stat.S_IRWXU)
     return shim
+
+
+def write_shims(directory: Path) -> None:
+    for agent in cli.CLIS.values():
+        write_shim(directory, agent.executable)
+    # Found, so the session's servers always include comfy-mcp; no fake agent runs it.
+    stub = directory / cli.MCP_SERVER
+    stub.write_text("#!/bin/sh\nexit 1\n")
+    stub.chmod(stat.S_IRWXU)
 
 
 def build_app(root: Path, port: int) -> tuple[web.Application, Path]:
@@ -94,17 +108,23 @@ def main() -> None:
     root = Path(tempfile.mkdtemp(prefix="harness-browser-"))
     shims = root / "bin"
     shims.mkdir()
-    write_shim(shims)
-    os.environ["PATH"] = f"{shims}{os.pathsep}{os.environ.get('PATH', '')}"
+    write_shims(shims)
+    # Only the shims: a real agent elsewhere on PATH or in ~/.local/bin is never found.
+    os.environ["PATH"] = str(shims)
+    home = root / "home"
+    home.mkdir()
+    os.environ["HOME"] = str(home)
     shared = os.environ.get("HARNESS_TEST_STATE")
     if shared and not os.environ.get("FAKE_CLI_LOG"):
         os.environ["FAKE_CLI_LOG"] = str(Path(shared) / "fake_cli.log")
-    found = cli.find("claude")
-    if found.parent != shims:
-        raise SystemExit(f"claude resolves to {found}, not the fake")
+    for agent in cli.CLIS:
+        found = cli.find(agent)
+        if found.parent != shims:
+            raise SystemExit(f"{agent} resolves to {found}, not the fake")
     app, data_dir = build_app(root, port)
     if shared:
         (Path(shared) / "data_dir").write_text(str(data_dir))
+        (Path(shared) / "bin_dir").write_text(str(shims))
     print(data_dir, flush=True)
     try:
         web.run_app(app, host=HOST, port=port, print=None)

@@ -8,20 +8,36 @@ import logging
 import os
 import secrets
 import time
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Callable, Mapping, Optional, Protocol
 
 from . import cli as cli_mod
-from .guard import Refusal
+from . import launch as launch_mod
+from .guard import STATUS, Refusal
+from .store import DEFAULT_AGENT, MAX_FOLDER_ECHO, StoreError, printable
 
 IDLE_SECONDS = 1800
 DETACHED_LIMIT_SECONDS = 43200
 TICK_SECONDS = 30
 HIGH_WATER = 1 << 20
 BOOT_BYTES = 8
-MAX_SHOWN_ID = 32
+# Every file plan_launch may write; one the current agent does not use is removed.
+LAUNCH_FILES = (launch_mod.CLAUDE_FILE, launch_mod.COPILOT_FILE)
 
 log = logging.getLogger("harness")
+
+
+def _store_refusal(error: StoreError) -> Refusal:
+    code = error.code if error.code in STATUS else "bad_state"
+    return Refusal(code, str(error))
+
+
+def _folder_missing(folder: Path) -> Refusal:
+    shown = printable(str(folder), MAX_FOLDER_ECHO)
+    if shown is None:
+        return Refusal("folder_missing", "The agent's folder is gone (path not shown).")
+    return Refusal("folder_missing", f"The agent's folder is gone: {shown}")
 
 
 class Sink(Protocol):
@@ -37,14 +53,14 @@ class SessionManager:
         self,
         host_factory: Callable[[], Any],
         store: Any,
-        cwd: Path,
+        default_folder: Path,
         comfy_url: Callable[[], str],
         clock: Callable[[], float] = time.monotonic,
         bridge: Any = None,
     ) -> None:
         self._host_factory = host_factory
         self._store = store
-        self._cwd = cwd
+        self._default_folder = default_folder
         self._comfy_url = comfy_url
         self._clock = clock
         self._bridge = bridge
@@ -52,6 +68,7 @@ class SessionManager:
         self._host: Any = None
         self._cli_id = ""
         self._started = 0.0
+        self._fresh_after_change = False
         self._sink: Optional[Sink] = None
         self._last_detach = 0.0
         self._last_output = 0.0
@@ -60,7 +77,11 @@ class SessionManager:
     def info(self) -> Optional[dict]:
         if self._host is None:
             return None
-        return {"cli": self._cli_id, "started": self._started}
+        return {
+            "cli": self._cli_id,
+            "started": self._started,
+            "fresh_after_change": self._fresh_after_change,
+        }
 
     @property
     def sink(self) -> Optional[Sink]:
@@ -70,29 +91,78 @@ class SessionManager:
         """True if a session runs and this sink is the one attached to it."""
         return self._host is not None and sink is self._sink
 
-    def start(self, sink: Sink, cli_id: str, cols: int, rows: int, resume: bool) -> None:
+    def start(self, sink: Sink, cols: int, rows: int, resume: bool) -> None:
+        """Start the agent chosen on the machine; the page chooses nothing."""
         if self._host is not None:
             self.attach(sink, cols, rows)
             return
-        exe = self._find(cli_id)
-        cli = cli_mod.CLIS[cli_id]
+        choice = self._choice()
+        cli = cli_mod.CLIS[choice.agent]
+        exe = self._find(cli.id)
         url = self._comfy_url()
         # A secret only when the canvas entry will be written with it (the same test
-        # write_mcp_file makes), so the bridge is never live without the entry.
+        # mcp_servers makes), so the bridge is never live without the entry.
         bridge_works = self._bridge is not None and cli_mod.is_loopback_http(url)
         secret = self._bridge.open_session() if bridge_works else None
         try:
-            self._spawn(sink, cli_id, cli, exe, url, cols, rows, resume, secret)
+            self._spawn(sink, choice, cli, exe, url, cols, rows, resume, secret)
         except BaseException:
             # No path may leave a live secret without a session.
             self._close_bridge_session()
             raise
-        log.info("session started: %s", cli_id)
+        log.info("session started: %s", cli.id)
+
+    def _choice(self) -> Any:
+        """The saved or default choice; an ignored file blocks the start."""
+        try:
+            choice = self._store.agent_choice(self._default_folder)
+        except StoreError as error:
+            raise _store_refusal(error) from error
+        if choice.source == "ignored":
+            # Its agent and folder are placeholders: never start them.
+            raise Refusal("agent_choice_ignored", choice.reason)
+        return choice
+
+    def _changed_since_last(self, choice: Any) -> bool:
+        """True when the last session used another agent or folder.
+
+        No record means an install from before the choice, which could only
+        have run claude in the default folder.
+        """
+        state = self._store.state
+        last = (state.last_agent, state.last_folder)
+        if not state.last_agent and not state.last_folder:
+            last = (DEFAULT_AGENT, str(self._default_folder))
+        return last != (choice.agent, str(choice.folder))
+
+    def _write_launch_files(self, files: Mapping[str, bytes]) -> None:
+        try:
+            for name in LAUNCH_FILES:
+                if name not in files:
+                    self._store.remove_private(name)
+            for name, body in files.items():
+                self._store.write_private(name, body)
+        except StoreError as error:
+            raise _store_refusal(error) from error
+        except OSError as error:
+            reason = error.strerror or type(error).__name__
+            raise Refusal("spawn_failed", f"Could not write the MCP config: {reason}") from error
+
+    def _record(self, choice: Any) -> None:
+        """Remember what this session used. A failure here must not end the session."""
+        agent, folder = choice.agent, str(choice.folder)
+        state = self._store.state
+        if (state.last_agent, state.last_folder) == (agent, folder):
+            return
+        try:
+            self._store.update(lambda s: replace(s, last_agent=agent, last_folder=folder))
+        except Exception as error:  # noqa: BLE001 - bookkeeping never ends a live session
+            log.warning("could not record the session's agent: %s", type(error).__name__)
 
     def _spawn(
         self,
         sink: Sink,
-        cli_id: str,
+        choice: Any,
         cli: cli_mod.Cli,
         exe: Path,
         url: str,
@@ -101,27 +171,32 @@ class SessionManager:
         resume: bool,
         secret: Optional[str],
     ) -> None:
-        try:
-            wrote = cli_mod.write_mcp_file(self._store.mcp_path, url, canvas_secret=secret)
-        except OSError as error:
-            reason = error.strerror or type(error).__name__
-            raise Refusal("spawn_failed", f"Could not write the MCP config: {reason}") from error
-        mcp = self._store.mcp_path if wrote.any else None
-        argv = cli_mod.build_argv(cli, exe, mcp, resume)
+        folder = choice.folder
+        # Before any file is written, so a refusal leaves no secret-bearing file behind.
+        if not os.path.isdir(folder):
+            raise _folder_missing(folder)
+        fresh_after_change = resume and self._changed_since_last(choice)
+        servers = cli_mod.mcp_servers(url, canvas_secret=secret)
+        launch = launch_mod.plan_launch(
+            cli, exe, servers, self._store.data_dir, resume and not fresh_after_change
+        )
+        self._write_launch_files(launch.files)
         env = cli_mod.build_env(os.environ)
+        env.update(launch.env)
         host = self._host_factory()
         now = self._clock()
         self._host = host
-        self._cli_id = cli_id
+        self._cli_id = cli.id
         self._started = time.time()
+        self._fresh_after_change = fresh_after_change
         self._sink = sink
         self._last_detach = now
         self._last_output = now
         self._paused = False
         try:
             host.start(
-                argv,
-                self._cwd,
+                list(launch.argv),
+                folder,
                 env,
                 cols,
                 rows,
@@ -138,6 +213,7 @@ class SessionManager:
             else:
                 message = type(error).__name__
             raise Refusal("spawn_failed", message) from error
+        self._record(choice)
 
     def attach(self, sink: Sink, cols: int, rows: int) -> None:
         if self._host is None:
@@ -186,14 +262,12 @@ class SessionManager:
         elif now - max(self._last_detach, self._last_output) >= IDLE_SECONDS:
             await self.stop("idle")
 
-    def _find(self, cli_id: str) -> Path:
+    @staticmethod
+    def _find(cli_id: str) -> Path:
         try:
             return cli_mod.find(cli_id)
-        except KeyError as error:
-            shown = cli_id[:MAX_SHOWN_ID]
-            raise Refusal("cli_not_found", f"Unknown CLI: {shown}") from error
         except cli_mod.CliNotFound as error:
-            raise Refusal("cli_not_found", str(error)) from error
+            raise Refusal("agent_not_installed", str(error)) from error
 
     def _on_output(self, host: Any, data: bytes) -> None:
         if host is not self._host:
@@ -249,6 +323,7 @@ class SessionManager:
         self._host = None
         self._sink = None
         self._cli_id = ""
+        self._fresh_after_change = False
         self._paused = False
 
     def _send_json(self, sink: Sink, message: dict) -> None:

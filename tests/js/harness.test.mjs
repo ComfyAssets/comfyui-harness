@@ -222,7 +222,7 @@ test("opacity is set on the panel element only", async () => {
 test("hello without a session starts claude; hello with one attaches", async () => {
   const env = await openReady();
   env.socket().receive({ type: "hello", boot: "b1", session: null });
-  assert.deepEqual(env.socket().json().at(-1), { type: "start", cli: "claude", cols: 80, rows: 24, resume: false });
+  assert.deepEqual(env.socket().json().at(-1), { type: "start", cols: 80, rows: 24, resume: false });
   const fresh = await openReady();
   fresh.socket().receive({ type: "hello", boot: "b1", session: { cli: "claude" } });
   assert.deepEqual(fresh.socket().json().at(-1), { type: "attach", cols: 80, rows: 24 });
@@ -237,7 +237,7 @@ test("a different boot id shows restarted, and continue starts with resume", asy
   assert.equal(ws.json().length, before, "nothing sent automatically after a restart");
   assert.ok(byText(env.panel.element, "ComfyUI restarted; the session ended"));
   byText(env.panel.element, "Start again and continue", "BUTTON").click();
-  assert.deepEqual(ws.json().at(-1), { type: "start", cli: "claude", cols: 80, rows: 24, resume: true });
+  assert.deepEqual(ws.json().at(-1), { type: "start", cols: 80, rows: 24, resume: true });
 });
 
 test("exit shows the code and start again starts a new session", async () => {
@@ -248,7 +248,7 @@ test("exit shows the code and start again starts a new session", async () => {
   ws.receive({ type: "exit", code: 2 });
   assert.match(env.panel.element.textContent, /code 2/);
   byText(env.panel.element, "Start again", "BUTTON").click();
-  assert.deepEqual(ws.json().at(-1), { type: "start", cli: "claude", cols: 80, rows: 24, resume: false });
+  assert.deepEqual(ws.json().at(-1), { type: "start", cols: 80, rows: 24, resume: false });
 });
 
 test("taken over shows use here, which reconnects and attaches", async () => {
@@ -274,8 +274,8 @@ test("other detach reasons show why the session ended", async () => {
 test("an error frame is shown as text without closing the socket", async () => {
   const env = await openReady();
   const ws = env.socket();
-  ws.receive({ type: "error", code: "cli_not_found", message: "<b>claude</b> was not found." });
-  assert.match(env.panel.element.textContent, /cli_not_found/);
+  ws.receive({ type: "error", code: "agent_not_installed", message: "<b>claude</b> was not found." });
+  assert.match(env.panel.element.textContent, /agent_not_installed/);
   assert.match(env.panel.element.textContent, /<b>claude<\/b> was not found\./);
   assert.equal(ws.closed, false);
 });
@@ -437,7 +437,7 @@ test("start again while reconnecting is sent on the next hello", async () => {
   env.runTimers();
   const next = env.socket();
   next.receive({ type: "hello", boot: "b1", session: null });
-  assert.deepEqual(next.json().at(-1), { type: "start", cli: "claude", cols: 80, rows: 24, resume: false });
+  assert.deepEqual(next.json().at(-1), { type: "start", cols: 80, rows: 24, resume: false });
 });
 
 test("continue while reconnecting keeps the resume flag for the next hello", async () => {
@@ -449,7 +449,7 @@ test("continue while reconnecting keeps the resume flag for the next hello", asy
   env.runTimers();
   const next = env.socket();
   next.receive({ type: "hello", boot: "b2", session: null });
-  assert.deepEqual(next.json().at(-1), { type: "start", cli: "claude", cols: 80, rows: 24, resume: true });
+  assert.deepEqual(next.json().at(-1), { type: "start", cols: 80, rows: 24, resume: true });
   assert.equal(next.json().filter((m) => m.type === "start").length, 1);
 });
 
@@ -470,7 +470,7 @@ test("Start again in the Canvas rows sends stop then start with resume true", as
   await flush();
   assert.deepEqual(env.socket().json().slice(-2), [
     { type: "stop" },
-    { type: "start", cli: "claude", cols: 80, rows: 24, resume: true },
+    { type: "start", cols: 80, rows: 24, resume: true },
   ]);
 });
 
@@ -564,7 +564,7 @@ test("turning the terminal back on starts a new session at once", async () => {
   await flush();
   const ws = env.socket();
   ws.receive({ type: "hello", boot: "b1", session: null });
-  assert.deepEqual(ws.json().at(-1), { type: "start", cli: "claude", cols: 80, rows: 24, resume: false });
+  assert.deepEqual(ws.json().at(-1), { type: "start", cols: 80, rows: 24, resume: false });
   assert.equal(byText(env.panel.element, "Start again", "BUTTON"), undefined);
 });
 
@@ -934,4 +934,134 @@ test("restore after a batch that recorded its own step drops that step too", asy
   assert.equal(tracker.undoQueue.at(-1), author, "the next Ctrl+Z undoes the author's own last step");
   assert.deepEqual(tracker.activeState, before);
   assert.deepEqual(tracker.redoQueue, []);
+});
+
+// --- onboarding: the agent and folder chosen on the machine ---
+
+const AGENT_READY = {
+  ...READY,
+  agent: "codex", agent_name: "Codex CLI", agent_found: true, agent_install: "npm i -g @openai/codex",
+  agent_folder: "/home/v/work", agent_folder_ok: true, agent_choice: "saved", agent_choice_reason: null,
+  agent_unprompted: false, agents_installed: ["codex"], pair_script: "/n/pair.py",
+};
+const AGENT_MISSING = { ...AGENT_READY, agent_found: false, cli_found: false, agents_installed: ["claude"] };
+const statusCalls = (env) => env.io.calls.filter((c) => c.url === "/harness/status").length;
+
+test("the start message carries no cli: the machine chooses the agent", async () => {
+  const env = await openReady({ status: AGENT_READY });
+  env.socket().receive({ type: "hello", boot: "b1", session: null });
+  const start = env.socket().json().at(-1);
+  assert.deepEqual(start, { type: "start", cols: 80, rows: 24, resume: false });
+  assert.equal("cli" in start, false);
+});
+
+test("a missing agent shows its view and does not connect", async () => {
+  const env = await openReady({ status: AGENT_MISSING });
+  assert.ok(byText(env.panel.element, "Codex CLI is not installed on the ComfyUI machine."));
+  assert.ok(byText(env.panel.element, "Check again", "BUTTON"));
+  assert.equal(FakeSocket.all.length, 0);
+});
+
+test("Check again fetches the status once and opens the terminal once the agent is found", async () => {
+  const env = await openReady({ status: AGENT_MISSING });
+  const before = statusCalls(env);
+  env.state.status = AGENT_READY;
+  byText(env.panel.element, "Check again", "BUTTON").click();
+  await flush();
+  assert.equal(statusCalls(env), before + 1);
+  assert.equal(FakeSocket.all.length, 1);
+  assert.equal(byText(env.panel.element, "Check again", "BUTTON"), undefined);
+});
+
+test("Check again while still missing keeps the view and does not connect", async () => {
+  const env = await openReady({ status: AGENT_MISSING });
+  const before = statusCalls(env);
+  byText(env.panel.element, "Check again", "BUTTON").click();
+  await flush();
+  assert.equal(statusCalls(env), before + 1);
+  assert.equal(FakeSocket.all.length, 0);
+  assert.ok(byText(env.panel.element, "Check again", "BUTTON"));
+});
+
+test("a start refused for the agent or folder fetches the status and shows its view", async () => {
+  const env = await openReady({ status: AGENT_READY });
+  const ws = env.socket();
+  ws.receive({ type: "hello", boot: "b1", session: null });
+  env.state.status = { ...AGENT_READY, agent_folder_ok: false };
+  ws.receive({ type: "error", code: "folder_missing", message: "The agent's folder is gone: /home/v/work" });
+  await flush();
+  assert.ok(byText(env.panel.element, "/home/v/work no longer exists. Choose another with:"));
+});
+
+test("a resumed start after the agent or folder changed says a new conversation started", async () => {
+  const env = await openReady({ status: AGENT_READY });
+  const ws = env.socket();
+  ws.receive({ type: "hello", boot: "b1", session: null });
+  ws.receive({ type: "hello", boot: "b2", session: null });
+  byText(env.panel.element, "Start again and continue", "BUTTON").click();
+  env.state.status = { ...AGENT_READY, session: { cli: "codex", started: 1, fresh_after_change: true } };
+  ws.receive({ type: "started" });
+  await flush();
+  assert.ok(byText(env.panel.element, "Started a new conversation: the agent or folder changed."));
+});
+
+test("a resumed start that kept the conversation says nothing", async () => {
+  const env = await openReady({ status: AGENT_READY });
+  const ws = env.socket();
+  ws.receive({ type: "hello", boot: "b1", session: null });
+  ws.receive({ type: "hello", boot: "b2", session: null });
+  byText(env.panel.element, "Start again and continue", "BUTTON").click();
+  env.state.status = { ...AGENT_READY, session: { cli: "codex", started: 1, fresh_after_change: false } };
+  ws.receive({ type: "started" });
+  await flush();
+  assert.equal(byText(env.panel.element, "Started a new conversation: the agent or folder changed."), undefined);
+});
+
+test("the header names the running agent and warns when it runs without asking", async () => {
+  const env = await openReady({ status: { ...AGENT_READY, agent_unprompted: true } });
+  assert.ok(byText(env.panel.element, "⚠ Codex CLI runs without asking"));
+});
+
+// --- a running session is not hidden by a changed choice ---
+
+const SESSION = { cli: "codex", started: 1, fresh_after_change: false };
+
+for (const [label, change] of [
+  ["a missing agent", { agent_found: false, cli_found: false, agents_installed: ["claude"] }],
+  ["a missing folder", { agent_folder_ok: false }],
+  ["an ignored choice", { agent_choice: "ignored", agent_choice_reason: "bad json" }],
+]) {
+  test(`${label} while a session runs attaches to it`, async () => {
+    const env = await openReady({ status: { ...AGENT_READY, ...change, session: SESSION } });
+    assert.equal(FakeSocket.all.length, 1);
+    env.socket().receive({ type: "hello", boot: "b1", session: SESSION });
+    assert.deepEqual(env.socket().json().at(-1), { type: "attach", cols: 80, rows: 24 });
+    assert.equal(byText(env.panel.element, "Check again", "BUTTON"), undefined);
+  });
+}
+
+test("the header names the running agent, without the chosen agent's badge", async () => {
+  const status = { ...AGENT_READY, agent_unprompted: true, session: { ...SESSION, cli: "claude" } };
+  const env = await openReady({ status });
+  assert.ok(byText(env.panel.element, "Claude Code"));
+  assert.equal(byText(env.panel.element, "⚠ Codex CLI runs without asking"), undefined);
+  assert.equal(byText(env.panel.element, "⚠ Claude Code runs without asking"), undefined);
+});
+
+test("an ignored choice sets no title or badge from its placeholder values", async () => {
+  const status = { ...AGENT_READY, agent_unprompted: true, agent_choice: "ignored", agent_choice_reason: "bad json" };
+  const env = await openReady({ status });
+  assert.equal(byText(env.panel.element, "Codex CLI"), undefined);
+  assert.equal(byText(env.panel.element, "⚠ Codex CLI runs without asking"), undefined);
+});
+
+test("a session started from this page is named by the status fetched after it started", async () => {
+  const env = await openReady({ status: AGENT_READY });
+  const ws = env.socket();
+  ws.receive({ type: "hello", boot: "b1", session: null });
+  env.state.status = { ...AGENT_READY, agent_name: "opencode", agent: "opencode", session: { ...SESSION, cli: "claude" } };
+  ws.receive({ type: "started" });
+  await flush();
+  ws.receive({ type: "exit", code: 0 });
+  assert.ok(byText(env.panel.element, "Claude Code exited with code 0"));
 });

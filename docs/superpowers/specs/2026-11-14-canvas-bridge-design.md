@@ -233,7 +233,7 @@ looks local, so it would prove nothing. The secret is the control.
 
 ### 6.3 Connecting it to the CLI
 
-`cli.write_mcp_file` gains the bridge entry beside `comfy-mcp`:
+`cli.mcp_servers` gives the bridge entry beside `comfy-mcp`:
 
 ```json
 "canvas": { "type": "http", "url": "<comfy_url>/harness/mcp",
@@ -243,8 +243,8 @@ looks local, so it would prove nothing. The secret is the control.
 It is written only when the bridge is enabled at session start. The file is
 already mode 600 in the data dir and rewritten per session. `comfy-mcp` being
 absent no longer means the file is removed: the file exists when either entry
-does, and `--mcp-config` is passed when the file exists. `write_mcp_file`
-reports which entries it wrote, and status keeps reporting `comfy-mcp` and
+does, and `--mcp-config` is passed when the file exists. `cli.mcp_servers`
+reports which entries apply, and status keeps reporting `comfy-mcp` and
 the bridge separately. `<comfy_url>` is the same loopback URL `comfy-mcp`
 gets.
 
@@ -389,7 +389,7 @@ it is ready to test instead of running it yourself.
 - The read tools `get_errors` and `get_outputs` gain a `run` field
   (`idle`, `running` with the node now executing, or `queued`), so the agent
   can see when the run is done and then look at the result.
-- The panel's notice line says "Claude queued a run" with a **Cancel**
+- The panel's notice line says "<agent> queued a run" (the session's agent name from status, "The agent" when an older server sends none) with a **Cancel**
   button that removes that prompt from the queue, or interrupts it if it has
   started. The notice goes once the run is over: it is re-checked like the
   Undo notice, and "idle" counts as over once the run was seen queued or
