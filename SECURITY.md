@@ -49,6 +49,10 @@ Off by default. When a paired browser turns it on (after a dialog that says what
 
 **Reading the agents' own settings.** To show "⚠ <agent> runs without asking", the harness reads each agent's own user configuration (`~/.claude/settings.json`, `~/.codex/config.toml`, `~/.config/opencode/opencode.json`) read-only, for one setting, and reports only a yes or no to paired browsers. It never writes any agent's configuration. Copilot CLI is not checked.
 
+## Playwriter (optional, outside the harness)
+
+The harness only checks whether a `playwriter` command is on the PATH ComfyUI runs with and shows the answer to paired browsers. It does not run it, configure it, open a port for it or touch its secret. If you install Playwriter and share a tab, the access you grant is Playwriter's, not the harness's: whoever holds the share id, the agent included, can use every tab where the extension is enabled, open new tabs, and read what those pages show, what you type, their cookies and storage. Share traffic goes through playwriter.dev on Cloudflare. Playwriter's copied prompt runs `npx -y playwriter@latest`, which fetches and runs the newest version from npm each time unless you tell the agent to use the installed command. The id reaches the agent only in what you paste into the terminal, so it stays in the scrollback and in the conversation sent to the model; stop sharing when done, which kills the id. The harness terminal is inside the shared tab, so key presses the agent sends to the page can land in the terminal as its own input. Only Claude Code's permission settings stand between the agent and each Playwriter command. See [docs/playwriter.md](docs/playwriter.md).
+
 ## What restrains the agent
 
 Only the agent's own approval settings, each in its own configuration. They are the brake. The harness adds no flag that weakens them, for any agent (a test asserts that no argument list it builds contains one), and cannot strengthen them. The agent starts with whatever you have configured. If your settings let it act without asking, it will. Check them before you pair.
@@ -61,7 +65,7 @@ One chain is named in the pairing popup: if text the agent reads persuades it to
 - Pairing flooding can delay pairing.
 - Other custom nodes in the page can reach the terminal.
 - The agent and anything else running as the server's account can reach everything that account can.
-- Prompt injection through content the agent reads, limited only by the agent's own permission settings. With the canvas bridge on, that includes the open workflow.
+- Prompt injection through content the agent reads, limited only by the agent's own permission settings. With the canvas bridge on, that includes the open workflow; with Playwriter shared, any page in the shared tabs.
 - The canvas bridge's switches are defaults, not limits on the agent.
 - Every paired browser gets the same terminal session.
 - The agent can rewrite `agent.json` and so choose the next session's agent and folder.

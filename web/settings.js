@@ -28,6 +28,8 @@ const BRIDGE_REASONS = {
   not_loopback: "The canvas bridge needs ComfyUI to listen on this machine's own address (127.0.0.1 or all interfaces).",
 };
 const MCP_HINT = "pip install comfy-mcp";
+const PLAYWRITER_HINT = "npm i -g playwriter";
+const PLAYWRITER_GUIDE = "See docs/playwriter.md";
 
 export function clamp(id, value) {
   const range = RANGES[id];
@@ -159,20 +161,32 @@ export function renderServerRows({ document, io, status, browsers = [], onPair =
   switchLabel.append(box, make("span", "Terminal enabled"));
   root.append(switchLabel);
 
-  const found = (ok, text, hint) => {
+  // A missing optional tool is not an error: a muted mark instead of the red cross.
+  const MARKS = {
+    found: ["✓", "var(--success-text, #4ade80)"],
+    missing: ["✗", "var(--error-text, #ff8080)"],
+    optional: ["○", TOKENS.muted],
+  };
+  const found = (state, text, hint, note) => {
     const row = styled("div", undefined, { display: "flex", alignItems: "baseline", gap: "8px", flexWrap: "wrap" });
-    const mark = styled("span", ok ? "✓" : "✗", { color: ok ? "var(--success-text, #4ade80)" : "var(--error-text, #ff8080)", fontWeight: "700" });
-    row.append(mark, make("span", text));
+    const [symbol, color] = MARKS[state];
+    row.append(styled("span", symbol, { color, fontWeight: "700" }), make("span", text));
     if (hint) {
       row.append(
         styled("span", "Install it with:", MUTED),
         styled("code", hint, { fontFamily: TOKENS.mono, fontSize: "12px", padding: "1px 6px", borderRadius: "6px", background: TOKENS.input }),
       );
     }
+    if (note) row.append(styled("span", note, MUTED));
     return row;
   };
-  root.append(...("agent_found" in status ? agentRows() : [found(status.cli_found, status.cli_found ? "Claude Code found" : "Claude Code not found")]));
-  root.append(status.mcp_found ? found(true, "comfy-mcp found") : found(false, "comfy-mcp not found", MCP_HINT));
+  root.append(...("agent_found" in status ? agentRows() : [status.cli_found ? found("found", "Claude Code found") : found("missing", "Claude Code not found")]));
+  root.append(status.mcp_found ? found("found", "comfy-mcp found") : found("missing", "comfy-mcp not found", MCP_HINT));
+  root.append(
+    status.playwriter_found === true
+      ? found("found", "Playwriter found")
+      : found("optional", "Playwriter not found (optional)", PLAYWRITER_HINT, PLAYWRITER_GUIDE),
+  );
 
   const list = styled("div", undefined, { display: "flex", flexDirection: "column", gap: "8px", marginTop: "6px" });
   list.append(styled("h4", "Paired browsers", { margin: "0", fontSize: "13px", fontWeight: "600" }));

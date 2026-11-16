@@ -43,6 +43,7 @@ async def test_status_for_paired_caller_adds_cli_and_session(client, deps):
         "enabled": True,
         "cli_found": True,
         "mcp_found": False,
+        "playwriter_found": False,
         "session": None,
         "origin": ORIGIN,
         "bridge_enabled": False,
@@ -420,11 +421,17 @@ async def test_install_registers_only_the_plain_prefix(monkeypatch, tmp_path):
     assert "/harness/status" in paths
     assert not any(p.startswith("/api") for p in paths)
     assert deps.store_error is None
+
     assert deps.default_folder == tmp_path / "user"
     choice = AgentChoice("claude", tmp_path, "default", "")  # folder is only echoed
-    assert {"cli_found", "mcp_found", "agent", "agents_installed", "pair_script"} <= set(
-        deps.cli_status(choice)
-    )
+    assert {
+        "cli_found",
+        "mcp_found",
+        "playwriter_found",
+        "agent",
+        "agents_installed",
+        "pair_script",
+    } <= set(deps.cli_status(choice))
     assert deps.comfy_url() == "http://127.0.0.1:8188"
 
 

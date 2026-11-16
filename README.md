@@ -189,6 +189,10 @@ The switches are settings the harness honours, not limits on the agent: it runs 
 
 When the bridge is unavailable, Settings says why instead of showing the switches (status `bridge_reason`: `tls`, `not_loopback` or `unsupported`).
 
+## Optional: Playwriter
+
+For the rest of the page (menus, dialogs, settings, other extensions' panels, screenshots), the agent can drive your own Chrome tab through [Playwriter](https://github.com/remorses/playwriter), even when Chrome is on another machine. The harness does not ship or switch it on; it only shows under **Settings › Harness** whether the `playwriter` command is installed. You install the extension and the CLI, share the tab from Playwriter's toolbar, and paste its prompt into the terminal. Keep graph changes on the `canvas` tools, which check each edit and make it one undo step. Setup, what sharing gives away and how to stop it: [docs/playwriter.md](docs/playwriter.md).
+
 ## What the popup says
 
 Pairing shows this text, and you tick a box before a code is shown:

@@ -115,6 +115,8 @@ FORBIDDEN = tuple(dict.fromkeys(flag for cli in CLIS.values() for flag in cli.fo
 
 MCP_SERVER = "comfy-mcp"
 CANVAS_SERVER = "canvas"
+# Optional browser tool, installed by the owner with npm; only looked for, never run.
+PLAYWRITER = "playwriter"
 HARNESS_ENV_PREFIX = "COMFYUI_HARNESS_"
 LOCALE_KEYS = ("LC_ALL", "LC_CTYPE", "LANG")
 FALLBACK_LOCALE = "C.UTF-8"
@@ -169,6 +171,19 @@ def find_mcp_server(
     directories = [str(Path(python).parent), *_search_path(path, home)]
     for directory in directories:
         candidate = Path(directory) / MCP_SERVER
+        if _is_runnable(candidate):
+            return candidate
+    return None
+
+
+def find_playwriter(path: Optional[str] = None) -> Optional[Path]:
+    """playwriter on PATH only: the agent runs it by name with the server's PATH, so a
+    copy elsewhere (no ~/.local/bin fallback, unlike claude and comfy-mcp, which are
+    written as absolute paths) would read as found and then fail."""
+    if path is None:
+        path = os.environ.get("PATH", "")
+    for directory in (d for d in path.split(os.pathsep) if d and os.path.isabs(d)):
+        candidate = Path(directory) / PLAYWRITER
         if _is_runnable(candidate):
             return candidate
     return None
@@ -319,5 +334,6 @@ def status(
         "agent_choice_reason": choice.reason,
         "agent_unprompted": _unprompted(cli.id, home),
         "agents_installed": [i for i in AGENT_IDS if _is_found(i, path, home)],
+        "playwriter_found": find_playwriter(path) is not None,
         "pair_script": str(Path(__file__).absolute().parent.parent / "pair.py"),
     }
